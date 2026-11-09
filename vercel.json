@@ -1,0 +1,4 @@
+{
+  "crons": [{ "path": "/api/cron-morning", "schedule": "30 13 * * *" }],
+  "rewrites": [{ "source": "/_blob/:id", "destination": "/api/blob?id=:id" }]
+}

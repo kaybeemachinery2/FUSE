@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<link rel="icon" href="data:,"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Manager's Portal</title>
+<script>
+/* Implements the claude.use(...) runtime the portal was written for, on top of /api/*.
+   Loaded before the app. Shows a login screen first (outlet + PIN, or Director password). */
+(function () {
+  var SESSION = null, readyP = null;
+  window.__SESSION = null;
+
+  function api(path, body, opts) {
+    opts = opts || {};
+    return fetch(path, Object.assign({ method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin' },
+      body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, opts))
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (r.status === 401 && path !== '/api/login') { SESSION = null; location.reload(); }
+          if (!r.ok) { var e = new Error(j.error || ('Request failed (' + r.status + ')')); e.status = r.status; throw e; }
+          return j;
+        });
+      });
+  }
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
+  function loginUI(outlets) {
+    return new Promise(function (resolve) {
+      var d = document.createElement('div');
+      d.id = 'loginov';
+      d.style.cssText = 'position:fixed;inset:0;background:#FBF4F1;z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Arial,Helvetica,sans-serif';
+      var mode = 'manager';
+      function draw(msg) {
+        d.innerHTML = '<div style="background:#fff;border:1px solid #EAD9D3;border-radius:14px;padding:22px;max-width:360px;width:100%;box-shadow:0 6px 24px rgba(200,38,32,.12)">' +
+          '<div style="background:#C82620;color:#fff;border-radius:10px;padding:14px;text-align:center;font-family:Georgia,serif;font-size:22px;font-weight:bold;margin-bottom:16px">Manager\'s Portal</div>' +
+          (msg ? '<div style="background:#FDECEA;color:#B71C1C;border-radius:8px;padding:10px;margin-bottom:12px;font-size:14px">' + esc(msg) + '</div>' : '') +
+          (mode === 'manager'
+            ? '<label style="font-size:13px;color:#755F5A">Outlet</label><select id="lo" style="width:100%;padding:13px;font-size:16px;margin:4px 0 12px;border:1px solid #D9C6BF;border-radius:8px">' +
+              outlets.map(function (o) { return '<option>' + esc(o) + '</option>'; }).join('') + '</select>' +
+              '<label style="font-size:13px;color:#755F5A">PIN</label><input id="lp" type="password" inputmode="numeric" autocomplete="current-password" style="width:100%;padding:13px;font-size:18px;margin:4px 0 14px;border:1px solid #D9C6BF;border-radius:8px;box-sizing:border-box">'
+            : '<label style="font-size:13px;color:#755F5A">Director password</label><input id="lp" type="password" autocomplete="current-password" style="width:100%;padding:13px;font-size:16px;margin:4px 0 14px;border:1px solid #D9C6BF;border-radius:8px;box-sizing:border-box">') +
+          '<button id="lgo" style="width:100%;padding:14px;font-size:17px;background:#C82620;color:#fff;border:0;border-radius:10px;font-weight:bold">Sign in</button>' +
+          '<div style="text-align:center;margin-top:14px"><a href="#" id="lsw" style="color:#C82620;font-size:14px">' + (mode === 'manager' ? 'Director sign in' : 'Manager sign in') + '</a></div></div>';
+        d.querySelector('#lsw').onclick = function (e) { e.preventDefault(); mode = mode === 'manager' ? 'director' : 'manager'; draw(); };
+        var go = function () {
+          var btn = d.querySelector('#lgo'); btn.disabled = true; btn.textContent = 'Signing in...';
+          var body = mode === 'manager' ? { outlet: d.querySelector('#lo').value, pin: d.querySelector('#lp').value } : { password: d.querySelector('#lp').value };
+          api('/api/login', body).then(function (r) { d.remove(); resolve(r); }).catch(function (e) { draw(e.message); });
+        };
+        d.querySelector('#lgo').onclick = go;
+        d.querySelector('#lp').onkeydown = function (e) { if (e.key === 'Enter') go(); };
+      }
+      draw();
+      document.body.appendChild(d);
+    });
+  }
+
+  function signOutBtn() {
+    var b = document.createElement('a');
+    b.href = '#'; b.textContent = 'Sign out (' + (SESSION.role === 'director' ? 'Director' : SESSION.outlet) + ')';
+    b.style.cssText = 'position:fixed;right:10px;bottom:6px;font:12px Arial;color:#755F5A;background:rgba(255,255,255,.85);padding:3px 8px;border-radius:10px;z-index:9999';
+    b.onclick = function (e) { e.preventDefault(); api('/api/me?logout=1').then(function () { location.reload(); }); };
+    document.body.appendChild(b);
+  }
+
+  function ready() {
+    if (readyP) return readyP;
+    readyP = fetch('/api/me', { credentials: 'same-origin' }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (x) { return x.ok ? x.j : loginUI(x.j.outlets || []); })
+      .then(function (s) { SESSION = s; window.__SESSION = s; signOutBtn(); return s; });
+    return readyP;
+  }
+
+  function mkdoc(path) {
+    return {
+      get: function () { return api('/api/db', { op: 'get', path: path }).then(function (r) { return { exists: !!r.exists, data: function () { return r.data ? JSON.parse(JSON.stringify(r.data)) : undefined; } }; }); },
+      set: function (d) { return api('/api/db', { op: 'set', path: path, data: d }); }
+    };
+  }
+  function query(col, where) {
+    return {
+      where: function (f, op, v) { return query(col, where.concat([[f, v]])); },
+      get: function () { return api('/api/db', { op: 'query', collection: col, where: where }).then(function (r) { return { docs: r.docs.map(function (x) { return { data: function () { return x; } }; }) }; }); }
+    };
+  }
+  function fileToBlob(f) { return f; }
+
+  var CAPS = {
+    db: function () { return { doc: mkdoc, collection: function (c) { return query(c, []); } }; },
+    assets: function () {
+      return {
+        upload: function (blob, o) {
+          var type = (o && o.type) || blob.type || 'image/jpeg';
+          return fetch('/api/upload', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': type }, body: fileToBlob(blob) })
+            .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || 'Upload failed'); return { id: j.id }; }); });
+        },
+        delete: function () { return Promise.resolve(); }
+      };
+    },
+    mcp: function () {
+      return {
+        callTool: function (server, tool, input) {
+          if (tool !== 'send_message') return Promise.reject(new Error('Not supported'));
+          return api('/api/send', { subject: input.subject, htmlBody: input.htmlBody, attachments: input.attachments || [] }).then(function () { return { payload: { id: '1' } }; });
+        }
+      };
+    },
+    downloads: function () {
+      return {
+        save: function (o) {
+          var a = document.createElement('a'), u = URL.createObjectURL(o.data);
+          a.href = u; a.download = o.filename; document.body.appendChild(a); a.click();
+          setTimeout(function () { URL.revokeObjectURL(u); a.remove(); }, 1500);
+          return Promise.resolve();
+        }
+      };
+    },
+    user: function () {
+      return { me: function () { return Promise.resolve({ email: null, isOwner: SESSION.role === 'director', canEdit: false }); } };
+    }
+  };
+
+  window.claude = {
+    use: function (name) {
+      return ready().then(function () { if (!CAPS[name]) throw new Error('Unknown capability ' + name); return CAPS[name](); });
+    }
+  };
+})();
+
+</script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<style>
+:root{--b:#C82620;--g:#2A7A4B;--r:#A8201A;--o:#ef6c00;--bg:#F7F2EF}
+*{box-sizing:border-box}body{margin:0;font:15px/1.35 -apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:#2B1B19;padding-bottom:84px}
+header{background:var(--b);color:#fff;padding:12px 14px;position:sticky;top:0;z-index:5;display:flex;justify-content:space-between;align-items:center}
+header b{font-size:17px}header small{opacity:.85}
+.wrap{padding:10px}.card{background:#fff;border-radius:10px;margin-bottom:10px;box-shadow:0 1px 3px #0002;overflow:hidden}
+.card>h3{margin:0;padding:12px 14px;font-size:15px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;background:#F3E3DE}
+.card>h3 span.tick{font-size:12px;color:#777;font-weight:400}.card .body{padding:10px 12px;display:none}.card.open .body{display:block}
+.card.open>h3{background:var(--b);color:#fff}.card.open>h3 span.tick{color:#F2CFC8}
+label{display:block;font-size:12px;color:#555;margin:8px 0 3px}
+input,select,textarea{width:100%;padding:11px 10px;font-size:16px;border:1px solid #E0D2CC;border-radius:8px;background:#fff}
+input:focus,textarea:focus{outline:2px solid #C32D26;border-color:#C32D26}
+.grid{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:6px;align-items:center}.grid .h{font-size:12px;font-weight:700;color:#555;text-align:center}
+.grid .l{font-size:13px}.g2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.row{display:grid;gap:6px;margin-bottom:6px;align-items:center}.row button{padding:8px 0}
+button{font-size:15px;border:0;border-radius:8px;padding:12px 14px;background:var(--b);color:#fff;font-weight:600}
+button.sec{background:#EFE5E0;color:#222}button.x{background:#fbe9e7;color:var(--r);padding:8px 10px}button:disabled{opacity:.4}
+.add{width:100%;margin-top:4px}.sub{font-size:12px;color:#666;margin:2px 0 6px}
+.total{display:flex;justify-content:space-between;font-weight:700;padding:8px 2px;border-top:1px dashed #bbb;margin-top:6px}
+.bar{position:fixed;left:0;right:0;bottom:0;background:#fff;padding:10px;box-shadow:0 -2px 8px #0003;display:flex;gap:8px;z-index:6}.bar button{flex:1;font-size:17px}
+.login{max-width:360px;margin:18vh auto;padding:20px;background:#fff;border-radius:12px;text-align:center;box-shadow:0 2px 8px #0002}
+.banner{padding:18px;border-radius:12px;color:#fff;text-align:center;font-size:24px;font-weight:800;margin-bottom:10px}
+.ok{background:var(--g)}.short{background:var(--r)}.over{background:var(--o)}
+table.s{width:100%;border-collapse:collapse}table.s td{padding:7px 4px;border-bottom:1px solid #eee}table.s td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+table.s tr.b td{font-weight:700;background:#FAF3F0}.warn{background:#fff3e0;border-left:4px solid var(--o);padding:8px 10px;margin:6px 0;border-radius:4px;font-size:14px}
+.err{background:#ffebee;border-left:4px solid var(--r);padding:8px 10px;margin:6px 0;border-radius:4px;font-size:14px}
+.chk{display:flex;gap:10px;align-items:flex-start;padding:12px;background:#fff8e1;border-radius:8px;margin:10px 0}.chk input{width:24px;height:24px;margin-top:2px}
+.hide{display:none!important}
+.lg{height:38px;width:auto;margin-right:10px;border-radius:4px;vertical-align:middle;background:#C82620}.wm{display:inline-block;margin-right:10px;padding:4px 8px;border:2px solid #F2CFC8;border-radius:6px;font:800 15px Georgia,serif;letter-spacing:2px;color:#FBEFEB}header{align-items:center}header>div:first-child{display:flex;align-items:center}header>div:first-child>div{line-height:1.3}.wi{padding:10px 0;border-bottom:1px solid #eee}.ph{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;align-items:center}.pt{position:relative;display:inline-block}.pt img{width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid #ddd}.pt b{position:absolute;top:-6px;right:-6px;background:#c62828;color:#fff;border-radius:50%;width:20px;height:20px;text-align:center;line-height:20px;font-size:14px}.pa{display:inline-block;padding:9px 12px;border:1px dashed #999;border-radius:8px;font-size:14px;color:#444;cursor:pointer}.wb{display:flex;gap:6px;margin-top:6px}.wb button{flex:1;padding:11px;background:#e1e6f0;color:#222}.wb button.on.Y{background:#2e7d32;color:#fff}.wb button.on.N{background:#c62828;color:#fff}.wb button.on.A{background:#757575;color:#fff}.card>h3{cursor:default}select{width:100%;padding:11px 10px;font-size:16px;border:1px solid #c5ccd8;border-radius:8px;background:#fff}</style></head><body><div id="app"></div>
+<script>
+// Auto-extracted from the October NORTH DSR workbook (same layout as Gulshan/Johar/FUSE).
+const TEMPLATE = {"labels":{"A1":"Daily Sales Report - NORTH","N1":"Daily Expense & purchasing Report","N2":"Date","A3":"Sales  Report","F3":"Terminal 1","G3":"Terminal 2","H3":"Total","J3":"Currency Denominations","N3":"Total Cash Expense","R3":"Supplier/Local PI Payment","A4":"a","C4":"Gross Sales w/o GST","J4":"Value","K4":"Quanty","L4":"Amount","N4":"Petty Cash Expense","R4":"PI's #","S4":"Vendor/Item","T4":"Amount","A5":"b","B5":"Add","C5":"Sales Tax (GST)","N5":"Supplier/Local PI expense","A6":"C","B6":"Gross Sale with GST=(A+b)","N6":"Delivery Charges","Q6":2400,"A7":"d","B7":"Less","C7":"Discount","N7":"FoodGo Delivery/Extra Charges","Q7":2960,"A8":"e","B8":"Less","C8":"Sale Return","N8":"Service Charges","A9":"F","B9":"Net Sale with GST=(C-d-e)","N9":"Tip","A10":"g","B10":"Less","C10":"Entertainment","N10":"Rider Commission","A11":"H","B11":"Total Net Sales=(F-g)","N11":"Quarter Rent","Q11":0,"A12":"i","B12":"Less","C12":"Card Sale (Settlement)","N12":"Petty Cash Expenses","A13":"j","B13":"Less","C13":"Food Panda Delivery Sale","A14":"k","B14":"Less","C14":"UAN Credit Sale","A15":"l","B15":"Less","C15":"ppl voucher","J15":"Total Denom","A16":"M","B16":"Total Credit Sale=(i+j+k+l)","J16":"Customer Advance Redeemed","A17":"N","B17":"Cash Sales=(H-M)","J17":"Ocassion","K17":"Name","L17":"Amount","A18":"o","B18":"Less","C18":"Supplier/Local Payment","G18":0,"A19":"p","B19":"Less","C19":"Petty Cash Expense","G19":0,"A20":"Q","B20":"Total Net Cash Sales=(N-o-p)","A21":"R","B21":"Cash in Till","J21":"Total with Advances","A22":"S","B22":"Excess/Short=(Q-R)","J22":"ADVANCE PAYMENT - CUSTOMER","R22":"Total Supplier Payments","A23":"","J23":"Name/Cell#","K23":"Date","L23":"AMOUNT","R23":"Advances & Salaries","A24":"Department wise report","G24":"COGS","R24":"Dept.","S24":"Name","T24":"Amount","A25":"","E25":"Orders","F25":"Amount","G25":"Value of Goods issued from Store","A26":1,"B26":"Takeaway","A27":2,"B27":"Dine in","G27":"Less:IC Prod.","J27":"Total Amount","A28":3,"B28":"Delivery","G28":"Less:Meat Prod.","J28":"Change Money Float","A29":"Total","G29":"Food Cost","J29":"Value","K29":"Quanty","L29":"Amount","A30":"","E30":"Orders Received","G30":"Orders Cancelled","A31":1,"B31":"UAN","A32":2,"B32":"Food Panda","A33":3,"B33":"-","G33":"-","A34":"**** Manager Remarks ****","J38":"Total","J39":"Slips","N39":"Total PC Expenses","R39":"Total Advances","A40":"DISCARDED ITEMS","N40":"Vouchers Approved From Head Office","R40":"Cash Short Penalty","A41":"Item","C41":"Qty","D41":"Item","F41":"Qty","G41":"Item","H41":"Qty","R41":"ID #","S41":"Name","T41":"Amount","J43":"Total","J44":"Float Amount","A45":"DISCARDED ITEMS TOTAL AMOUNT","J45":"Difference","N45":"Total Voucher Expenses","R45":"Total Penalty","A46":"UTILITY SUMMARY","D47":"Closing Time","H47":"Operational Time","P47":"TOTAL \nCONSUMPTION","R47":"Target\nUnits","S47":"In Hand","T47":"Avg unit\nPer hour","A48":"Sr#","B48":"Meter #","D48":"Last Night","F48":"Morning","G48":"Consumption","H48":"Evening","J48":"Consumption","K48":"Night","O48":"Consumption","S50":"","S52":"","S53":"","R54":"8ltr/Hr","S54":"","S55":""},"formulas":{"O2":"=A2","H4":"=SUM(F4,G4)","Q4":"=Q6+Q7+Q8+Q9+Q10+Q11+Q39+Q45+T39+T45","H5":"=SUM(F5,G5)","L5":"=J5*K5","Q5":"=T22","F6":"=F4+F5","G6":"=G4+G5","H6":"=H4+H5","L6":"=J6*K6","H7":"=SUM(F7,G7)","L7":"=J7*K7","H8":"=SUM(F8,G8)","L8":"=J8*K8","F9":"=F6-F7-F8","G9":"=G6-G7-G8","H9":"=H6-H7-H8","L9":"=J9*K9","F10":"=995+1024+909+100","H10":"=SUM(F10,G10)","L10":"=J10*K10","F11":"=F9-F10","G11":"=G9-G10","H11":"=H9-H10","L11":"=J11*K11","H12":"=SUM(F12,G12)","L12":"=J12*K12","H13":"=SUM(F13,G13)","L13":"=J13*K13","H14":"=SUM(F14,G14)","L14":"=J14*K14","H15":"=SUM(F15,G15)","L15":"=SUM(L5:L14)","F16":"=SUM(F12:F15)","G16":"=SUM(G12:G15)","H16":"=SUM(H12:H15)","F17":"=F11-F16","G17":"=G11-G16","H17":"=H11-H16","F18":"=Q5","H18":"=SUM(F18,G18)","F19":"=Q4","H19":"=SUM(F19,G19)","F20":"=F17-F18-F19","G20":"=G17-G18-G19","H20":"=H17-H18-H19","H21":"=SUM(L21,0)","L21":"=SUM(L18:L20)+L15","H22":"=SUM(H21-H20)","T22":"=SUM(T5:T21)","L27":"=SUM(L24:L26)","E29":"=SUM(E26:E28)","F29":"=SUM(F26:F28)","H29":"=IFERROR((H25-H27-H28)/(H4+H5-H8),0)","L30":"=J30*K30","L31":"=J31*K31","L33":"=J33*K33","L34":"=J34*K34","L35":"=J35*K35","L36":"=J36*K36","L37":"=J37*K37","L38":"=SUM(L30:L37)","Q39":"=SUM(Q12:Q38)","T39":"=SUM(T25:T38)","L43":"=SUM(L40:L42)","L45":"=-(L44-L43-L38)","Q45":"=SUM(Q41:Q44)","T45":"=SUM(T42:T44)","G49":"=F49-D49","J49":"=H49-F49","O49":"=K49-H49","P49":"=G49+J49+O49","G50":"=F50-D50","J50":"=H50-F50","O50":"=K50-H50","P50":"=G50+J50+O50","G51":"=F51-D51","J51":"=H51-F51","P51":"=G51+J51+O51","G52":"=F52-D52","J52":"=H52-F52","O52":"=K52-H52","P52":"=G52+J52+O52","G53":"=F53-D53","J53":"=H53-F53","O53":"=K53-H53","P53":"=G53+J53+O53","G54":"=F54-D54","J54":"=H54-F54","O54":"=K54-H54","P54":"=G54+J54+O54","G55":"=F55-D55","J55":"=H55-F55","O55":"=K55-H55","P55":"=G55+J55+O55","G56":"=F56-D56","J56":"=H56-F56","O56":"=K56-H56","P56":"=G56+J56+O56","O51":"=K51-H51"},"bold":["A1","M1","N1","A2","E2","N2","O2","Q2","A3","F3","G3","H3","I3","J3","N3","R3","A4","B4","C4","F4","G4","H4","J4","K4","L4","N4","Q4","R4","S4","T4","A5","B5","C5","F5","G5","H5","J5","K5","L5","N5","Q5","R5","S5","T5","A6","B6","F6","G6","H6","J6","K6","L6","N6","Q6","R6","S6","T6","A7","B7","C7","F7","G7","H7","J7","K7","L7","N7","Q7","R7","S7","T7","A8","B8","C8","F8","G8","H8","J8","K8","L8","N8","Q8","R8","S8","T8","A9","B9","F9","G9","H9","J9","K9","L9","N9","Q9","R9","S9","T9","A10","B10","C10","F10","G10","H10","J10","K10","L10","N10","Q10","R10","S10","T10","A11","B11","F11","G11","H11","J11","K11","L11","N11","Q11","R11","S11","T11","A12","B12","C12","F12","G12","H12","J12","K12","L12","N12","R12","S12","T12","A13","B13","C13","F13","G13","H13","J13","K13","L13","N13","Q13","R13","S13","T13","A14","B14","C14","F14","G14","H14","J14","K14","L14","N14","Q14","R14","S14","T14","A15","B15","C15","F15","G15","H15","J15","L15","N15","Q15","R15","S15","T15","A16","B16","F16","G16","H16","J16","N16","Q16","R16","S16","T16","A17","B17","F17","G17","H17","J17","K17","L17","N17","Q17","R17","S17","T17","A18","B18","C18","F18","G18","H18","J18","K18","L18","N18","Q18","R18","S18","T18","A19","B19","C19","F19","G19","H19","J19","K19","L19","N19","Q19","R19","S19","T19","A20","B20","F20","G20","H20","J20","K20","L20","N20","Q20","R20","S20","T20","A21","B21","F21","H21","J21","L21","N21","Q21","R21","S21","T21","A22","B22","F22","H22","J22","N22","Q22","R22","T22","J23","K23","L23","N23","Q23","R23","A24","G24","J24","K24","L24","N24","Q24","R24","S24","T24","A25","E25","F25","H25","J25","K25","L25","N25","Q25","R25","S25","T25","A26","B26","E26","F26","K26","L26","N26","Q26","R26","S26","T26","A27","B27","E27","F27","H27","J27","K27","L27","N27","Q27","R27","S27","T27","A28","B28","E28","F28","H28","J28","N28","Q28","R28","S28","T28","A29","E29","F29","G29","H29","J29","K29","L29","N29","Q29","R29","S29","T29","A30","E30","G30","J30","K30","L30","N30","Q30","R30","S30","T30","A31","B31","E31","G31","J31","K31","L31","N31","Q31","R31","S31","T31","A32","B32","E32","G32","J32","K32","L32","N32","Q32","R32","S32","T32","A33","B33","E33","G33","J33","K33","L33","N33","Q33","R33","S33","T33","A34","J34","K34","L34","N34","Q34","R34","S34","T34","A35","J35","K35","L35","N35","Q35","R35","S35","T35","A36","J36","K36","L36","N36","Q36","R36","S36","T36","A37","J37","K37","L37","N37","Q37","R37","S37","T37","A38","J38","K38","L38","N38","Q38","R38","S38","T38","A39","J39","N39","Q39","R39","T39","A40","J40","L40","N40","R40","A41","C41","D41","F41","G41","H41","J41","L41","N41","Q41","R41","S41","T41","A42","C42","D42","F42","G42","H42","J42","L42","N42","Q42","R42","S42","T42","A43","C43","D43","F43","G43","H43","J43","L43","N43","Q43","R43","S43","T43","A44","C44","D44","F44","G44","H44","J44","K44","L44","N44","Q44","R44","S44","T44","A45","H45","J45","K45","L45","N45","Q45","R45","T45","A46","D47","H47","P47","R47","S47","T47","A48","B48","D48","F48","G48","H48","J48","K48","O48","A49","B49","D49","F49","G49","H49","J49","K49","O49","P49","R49","S49","T49","A50","B50","D50","F50","G50","H50","J50","K50","O50","P50","R50","S50","T50","A51","B51","D51","F51","G51","H51","J51","K51","O51","P51","R51","S51","T51","A52","B52","D52","F52","G52","H52","J52","K52","O52","P52","R52","S52","T52","A53","B53","D53","F53","G53","H53","J53","K53","O53","P53","R53","S53","T53","A54","B54","D54","F54","G54","H54","J54","K54","O54","P54","R54","S54","T54","A55","B55","D55","F55","G55","H55","J55","K55","O55","P55","R55","S55","T55","A56","B56","D56","F56","G56","H56","J56","K56","O56","P56","R56","S56","T56"],"fills":{"A3":"#FFFF00","F3":"#FFFF00","G3":"#FFFF00","H3":"#FFFF00","J3":"#FFFF00","N3":"#FFFF00","R3":"#FFFF00","H4":"#FFFF00","J4":"#FFFF00","K4":"#FFFF00","L4":"#FFFF00","R4":"#FFFF00","S4":"#FFFF00","T4":"#FFFF00","H5":"#FFFF00","A6":"#FFFF00","B6":"#FFFF00","F6":"#FFFF00","G6":"#FFFF00","H6":"#FFFF00","Q6":"#FFFF00","H7":"#FFFF00","Q7":"#FFFF00","H8":"#FFFF00","Q8":"#FFFF00","A9":"#FFFF00","B9":"#FFFF00","F9":"#FFFF00","G9":"#FFFF00","H9":"#FFFF00","Q9":"#FFFF00","H10":"#FFFF00","A11":"#FFFF00","B11":"#FFFF00","F11":"#FFFF00","G11":"#FFFF00","H11":"#FFFF00","H12":"#FFFF00","N12":"#FFFF00","C13":"#00B0F0","H13":"#FFFF00","H14":"#FFFF00","C15":"#FF0000","H15":"#FFFF00","A16":"#FFFF00","B16":"#FFFF00","F16":"#FFFF00","G16":"#FFFF00","H16":"#FFFF00","A17":"#FFFF00","B17":"#FFFF00","F17":"#FFFF00","G17":"#FFFF00","H17":"#FFFF00","J17":"#FFFF00","K17":"#FFFF00","L17":"#FFFF00","H18":"#FFFF00","H19":"#FFFF00","A20":"#FFFF00","B20":"#FFFF00","F20":"#FFFF00","G20":"#FFFF00","H20":"#FFFF00","A21":"#FFFF00","B21":"#FFFF00","F21":"#FFFF00","H21":"#FFFF00","A22":"#FFFF00","B22":"#FFFF00","F22":"#FFFF00","H22":"#FFFF00","J22":"#00B050","J23":"#00B050","K23":"#00B050","L23":"#00B050","R23":"#FFFF00","A24":"#FFFF00","G24":"#FF0000","R24":"#FFFF00","S24":"#FFFF00","T24":"#FFFF00","A25":"#FFFF00","E25":"#FFFF00","F25":"#FFFF00","J28":"#FFFF00","J29":"#FFFF00","K29":"#FFFF00","L29":"#FFFF00","A30":"#FFFF00","E30":"#FFFF00","G30":"#FFFF00","J39":"#FFFF00","A40":"#FFC000","N40":"#FFFF00","R40":"#FFFF00","A41":"#FFC000","C41":"#FFC000","D41":"#FFC000","F41":"#FFC000","G41":"#FFC000","H41":"#FFC000","R41":"#FFFF00","S41":"#FFFF00","T41":"#FFFF00","A42":"#FFC000","C42":"#FFC000","D42":"#FFC000","F42":"#FFC000","G42":"#FFC000","H42":"#FFC000","A43":"#FFC000","C43":"#FFC000","D43":"#FFC000","F43":"#FFC000","G43":"#FFC000","H43":"#FFC000","A44":"#FFC000","C44":"#FFC000","D44":"#FFC000","F44":"#FFC000","G44":"#FFC000","H44":"#FFC000","A45":"#FFC000","H45":"#FFC000","A46":"#FFFF00","A47":"#92D050","D47":"#92D050","H47":"#92D050","P47":"#92D050","R47":"#92D050","S47":"#92D050","T47":"#92D050","A48":"#92D050","B48":"#92D050","D48":"#92D050","F48":"#92D050","G48":"#92D050","H48":"#92D050","J48":"#92D050","K48":"#92D050","O48":"#92D050","F49":"#FFC000","G49":"#FFC000","F50":"#FFC000","G50":"#FFC000","F51":"#FFC000","G51":"#FFC000","F52":"#FFC000","G52":"#FFC000","F53":"#FFC000","G53":"#FFC000","F54":"#FFC000","G54":"#FFC000","F55":"#FFC000","G55":"#FFC000","F56":"#FFC000","G56":"#FFC000"},"widths":{"A":84,"B":84,"C":84,"D":84,"E":84,"F":75,"G":83,"H":103,"I":22,"J":45,"K":84,"L":75,"M":21,"N":84,"O":84,"P":84,"Q":83,"R":79,"S":84,"T":80},"merges":["H53:I53","N33:P33","K48:N48","N42:P42","A29:D29","N17:P17","H55:I55","N44:P44","B28:D28","N19:P19","N28:P28","A41:B41","K49:N49","N9:P9","C7:E7","D48:E48","H52:I52","J3:L3","B22:E22","N30:P30","A45:G45","B21:E21","N3:Q3","C18:E18","I3:I45","J39:L39","N12:Q12","R23:T23","A42:B42","N4:P4","D56:E56","B49:C49","A24:F24","B55:C55","O2:P2","J21:K21","N32:P32","A38:H38","B51:C51","D51:E51","R40:T40","A2:D2","A40:H40","N40:Q40","N18:P18","H54:I54","K53:N53","P50:Q50","N8:P8","H50:I50","C12:E12","H56:I56","J16:L16","R3:T3","P52:Q52","N10:P10","A30:D30","B16:E16","H49:I49","N34:P34","R45:S45","B53:C53","A3:E3","D53:E53","M1:M45","C13:E13","G24:H24","G33:H33","N36:P36","K51:N51","R47:R48","N45:P45","E2:L2","B11:E11","G25:G26","N20:P20","C15:E15","H47:O47","K50:N50","J28:L28","B31:D31","H48:I48","K56:N56","N22:P22","D47:G47","N37:P37","K52:N52","N21:P21","C10:E10","P55:Q55","B54:C54","P51:Q51","B6:E6","N14:P14","N23:P23","Q2:T2","B56:C56","J40:K40","F21:G21","B52:C52","P56:Q56","D52:E52","A47:C47","D49:E49","P49:Q49","E31:F31","A46:T46","K54:N54","K55:N55","N27:P27","F22:G22","N35:P35","P53:Q53","R22:S22","N11:P11","B17:E17","N25:P25","C14:E14","D55:E55","A35:H35","E32:F32","A43:B43","N1:T1","G32:H32","J42:K42","C4:E4","D54:E54","R39:S39","A34:H34","P54:Q54","B9:E9","A39:H39","T47:T48","E33:F33","N5:P5","A36:H36","N39:P39","B20:E20","P47:Q48","N29:P29","B48:C48","N38:P38","J22:L22","N13:P13","J15:K15","C8:E8","H51:I51","N31:P31","D41:E41","A37:H37","N6:P6","B33:D33","N15:P15","N24:P24","E30:F30","C19:E19","G30:H30","D43:E43","B32:D32","B26:D26","J41:K41","A25:D25","A23:H23","N26:P26","N7:P7","N41:P41","N16:P16","C5:E5","D42:E42","J43:K43","A1:L1","B27:D27","S47:S48","G31:H31","A44:B44","B50:C50","D50:E50","N43:P43","H25:H26","D44:E44"]};
+/**
+ * Pure logic (no Google APIs) so it can be unit-tested outside Apps Script.
+ * Mirrors the existing DSR workbook formulas cell for cell.
+ */
+function _n(v) { var x = Number(v); return isFinite(x) ? x : 0; }
+function _sum(arr, key) { return (arr || []).reduce(function (s, r) { return s + _n(key ? r[key] : r); }, 0); }
+
+var DENOMS = [5000, 1000, 500, 100, 50, 20, 10, 5];
+var CHANGE_DENOMS = [5000, 1000, 500, 100, 50, 20, 10];
+var LIMITS = { petty: 26, supplier: 17, advances: 14, penalties: 3, vouchers: 4, otherCash: 3, custAdv: 3, slips: 3, discarded: 9, meters: 8 };
+
+function dsrCalc(d) {
+  var k = ['gross', 'gst', 'disc', 'ret', 'ent', 'card', 'fp', 'uan', 'ppl'];
+  var T = [d.t1 || {}, d.t2 || {}];
+  var terms = T.map(function (t) {
+    var gross = _n(t.gross), gst = _n(t.gst), disc = _n(t.disc), ret = _n(t.ret), ent = _n(t.ent);
+    var gw = gross + gst, net = gw - disc - ret, tnet = net - ent;
+    var credit = _n(t.card) + _n(t.fp) + _n(t.uan) + _n(t.ppl);
+    return { gross: gross, gst: gst, gw: gw, disc: disc, ret: ret, net: net, ent: ent, tnet: tnet,
+             card: _n(t.card), fp: _n(t.fp), uan: _n(t.uan), ppl: _n(t.ppl), credit: credit, cash: tnet - credit };
+  });
+  var tot = {};
+  Object.keys(terms[0]).forEach(function (f) { tot[f] = terms[0][f] + terms[1][f]; });
+
+  var fx = d.fixed || {};
+  var fixed = _n(fx.delivery) + _n(fx.foodgo) + _n(fx.service) + _n(fx.tip) + _n(fx.rider) + _n(fx.rent);
+  var petty = _sum(d.petty, 'amt'), vouchers = _sum(d.vouchers, 'amt');
+  var advances = _sum(d.advances, 'amt'), penalties = _sum(d.penalties, 'amt');
+  var supplier = _sum(d.supplier, 'amt');
+  // Template: Q4 = fixed lines + petty + vouchers + advances + penalty (T45 is added, as in the existing sheet)
+  var pettyCashExpense = fixed + petty + vouchers + advances + penalties;
+
+  var netCash = tot.cash - supplier - pettyCashExpense;
+
+  var denomTotal = 0, dn = d.denoms || {};
+  DENOMS.forEach(function (v) { denomTotal += v * _n(dn[v]); });
+  denomTotal += _n(dn.coins);
+  var otherCash = _sum(d.otherCash, 'amt');
+  var cashInTill = denomTotal + otherCash;
+  var diff = cashInTill - netCash; // + = excess, - = short
+
+  var chg = 0, cd = d.changeDenoms || {};
+  CHANGE_DENOMS.forEach(function (v) { chg += v * _n(cd[v]); });
+  var slips = _sum(d.slips, 'amt');
+  var floatAmt = _n(d.floatAmt);
+  var floatDiff = chg + slips - floatAmt;
+
+  var dep = d.dept || {};
+  var deptOrders = _n((dep.takeaway || {}).orders) + _n((dep.dine || {}).orders) + _n((dep.delivery || {}).orders);
+  var deptAmt = _n((dep.takeaway || {}).amt) + _n((dep.dine || {}).amt) + _n((dep.delivery || {}).amt);
+  var cg = d.cogs || {};
+  var denom = tot.gross + tot.gst - tot.ret;
+  var foodCost = denom ? (_n(cg.issued) - _n(cg.ic) - _n(cg.meat)) / denom : 0;
+
+  var meters = (d.meters || []).map(function (m) {
+    var g = _n(m.morning) - _n(m.last), j = _n(m.evening) - _n(m.morning), o = _n(m.night) - _n(m.evening);
+    return { name: m.name, morning: g, evening: j, night: o, total: g + j + o };
+  });
+
+  var errors = [], warnings = [];
+  if (!tot.gross) errors.push('Gross sales are empty - enter sales from the POS closing report.');
+  if (!denomTotal && !otherCash) errors.push('Cash in till is empty - enter the currency count.');
+  if (deptAmt && Math.abs(deptAmt - tot.gross) > 1)
+    warnings.push('Takeaway + Dine-in + Delivery (' + deptAmt + ') does not match Gross Sales w/o GST (' + tot.gross + ').');
+  if (!deptAmt) warnings.push('Department-wise report (Takeaway / Dine-in / Delivery) is empty.');
+  if (Math.abs(floatDiff) > 0) warnings.push('Change money float differs by ' + floatDiff + ' from the ' + floatAmt + ' float.');
+  if (tot.cash < 0) warnings.push('Cash sales are negative - credit sales exceed net sales. Recheck card / Food Panda / UAN.');
+  (d.meters || []).forEach(function (m, i) {
+    var mm = meters[i];
+    if (mm && (mm.morning < 0 || mm.evening < 0 || mm.night < 0) && (m.morning !== '' || m.evening !== '' || m.night !== ''))
+      warnings.push('Meter ' + m.name + ' has a reading lower than the previous one.');
+  });
+
+  var status = Math.abs(diff) < 0.5 ? 'OK' : (diff < 0 ? 'SHORT' : 'OVER');
+  return { terms: terms, tot: tot, fixed: fixed, petty: petty, vouchers: vouchers, advances: advances, penalties: penalties,
+           supplier: supplier, pettyCashExpense: pettyCashExpense, netCash: netCash, denomTotal: denomTotal, otherCash: otherCash,
+           cashInTill: cashInTill, diff: diff, status: status, changeTotal: chg, slips: slips, floatDiff: floatDiff,
+           deptOrders: deptOrders, deptAmt: deptAmt, foodCost: foodCost, meters: meters, errors: errors, warnings: warnings };
+}
+
+/** Cell map for one day's sheet, same coordinates as the existing DSR template. */
+function buildDayCells(d, outletName) {
+  var c = {};
+  Object.keys(TEMPLATE.labels).forEach(function (a) { c[a] = TEMPLATE.labels[a]; });
+  Object.keys(TEMPLATE.formulas).forEach(function (a) { c[a] = TEMPLATE.formulas[a]; });
+  var set = function (a, v) { if (v !== '' && v !== null && v !== undefined) c[a] = v; };
+  c.A1 = 'Daily Sales Report - ' + String(outletName).toUpperCase();
+  c.A2 = { date: d.date };
+  c.E2 = d.dayName;
+  c.Q2 = d.dayName;
+  var rows = { gross: 4, gst: 5, disc: 7, ret: 8, ent: 10, card: 12, fp: 13, uan: 14, ppl: 15 };
+  Object.keys(rows).forEach(function (kk) {
+    set('F' + rows[kk], (d.t1 || {})[kk] === '' ? '' : _n((d.t1 || {})[kk]) || '');
+    set('G' + rows[kk], (d.t2 || {})[kk] === '' ? '' : _n((d.t2 || {})[kk]) || '');
+  });
+  c.C15 = 'PPL Voucher';
+  var fx = d.fixed || {};
+  set('Q6', _n(fx.delivery)); set('Q7', _n(fx.foodgo)); set('Q8', _n(fx.service));
+  set('Q9', _n(fx.tip)); set('Q10', _n(fx.rider)); set('Q11', _n(fx.rent));
+  (d.petty || []).slice(0, LIMITS.petty).forEach(function (r, i) { set('N' + (13 + i), r.item); set('Q' + (13 + i), _n(r.amt)); });
+  (d.supplier || []).slice(0, LIMITS.supplier).forEach(function (r, i) { set('R' + (5 + i), r.pi); set('S' + (5 + i), r.vendor); set('T' + (5 + i), _n(r.amt)); });
+  (d.advances || []).slice(0, LIMITS.advances).forEach(function (r, i) { set('R' + (25 + i), r.dept); set('S' + (25 + i), r.name); set('T' + (25 + i), _n(r.amt)); });
+  (d.penalties || []).slice(0, LIMITS.penalties).forEach(function (r, i) { set('R' + (42 + i), r.id); set('S' + (42 + i), r.name); set('T' + (42 + i), _n(r.amt)); });
+  (d.vouchers || []).slice(0, LIMITS.vouchers).forEach(function (r, i) { set('N' + (41 + i), r.item); set('Q' + (41 + i), _n(r.amt)); });
+  var dn = d.denoms || {};
+  DENOMS.forEach(function (v, i) { c['J' + (5 + i)] = v; c['K' + (5 + i)] = _n(dn[v]); });
+  c.J13 = 1; c.K13 = _n(dn.coins); c.J14 = 0; c.K14 = 0; // row 13 = coins / loose cash (value 1 x amount)
+  (d.otherCash || []).slice(0, LIMITS.otherCash).forEach(function (r, i) { set('J' + (18 + i), r.occasion); set('K' + (18 + i), r.name); set('L' + (18 + i), _n(r.amt)); });
+  (d.custAdv || []).slice(0, LIMITS.custAdv).forEach(function (r, i) { set('J' + (24 + i), r.name); set('K' + (24 + i), r.date); set('L' + (24 + i), _n(r.amt)); });
+  var dep = d.dept || {};
+  [['takeaway', 26], ['dine', 27], ['delivery', 28]].forEach(function (p) {
+    set('E' + p[1], _n((dep[p[0]] || {}).orders)); set('F' + p[1], _n((dep[p[0]] || {}).amt));
+  });
+  var rc = d.received || {}, cn = d.cancelled || {};
+  set('E31', _n(rc.uan)); set('E32', _n(rc.fp)); set('G31', _n(cn.uan)); set('G32', _n(cn.fp));
+  var cg = d.cogs || {};
+  c.H25 = _n(cg.issued); c.H27 = _n(cg.ic); c.H28 = _n(cg.meat);
+  if (d.remarks) c.A35 = d.remarks;
+  var cd = d.changeDenoms || {};
+  CHANGE_DENOMS.forEach(function (v, i) { c['J' + (30 + i)] = v; c['K' + (30 + i)] = _n(cd[v]); c['L' + (30 + i)] = '=J' + (30 + i) + '*K' + (30 + i); });
+  c.J37 = 0; c.K37 = 0; c.L37 = '=J37*K37';
+  (d.slips || []).slice(0, LIMITS.slips).forEach(function (r, i) { set('J' + (40 + i), r.ref); set('L' + (40 + i), _n(r.amt)); });
+  c.L44 = _n(d.floatAmt);
+  (d.discarded || []).slice(0, LIMITS.discarded).forEach(function (r, i) {
+    var row = 42 + Math.floor(i / 3), col = [['A', 'C'], ['D', 'F'], ['G', 'H']][i % 3];
+    set(col[0] + row, r.item); set(col[1] + row, _n(r.qty));
+  });
+  c.H45 = _n(d.discardedAmt);
+  (d.meters || []).slice(0, LIMITS.meters).forEach(function (m, i) {
+    var r = 49 + i;
+    c['A' + r] = i + 1; c['B' + r] = m.name;
+    c['D' + r] = _n(m.last); c['F' + r] = _n(m.morning); c['H' + r] = _n(m.evening); c['K' + r] = _n(m.night);
+  });
+  return c;
+}
+/* ---- workbook builder (uses global XLSX = xlsx-js-style) ---- */
+function _serial(iso){var p=iso.split('-');return Math.round((Date.UTC(+p[0],+p[1]-1,+p[2])-Date.UTC(1899,11,30))/86400000)}
+function _thin(){var b={style:'thin',color:{rgb:'999999'}};return{top:b,bottom:b,left:b,right:b}}
+function buildDaySheet(d,outlet){
+  var cells=buildDayCells(d,outlet),ws={},boxes=['A3:H22','J3:L22','N3:T22','A24:H45','J24:L45','N23:T45','A46:T56'];
+  var all={};Object.keys(cells).forEach(function(a){all[a]=1});TEMPLATE.bold.forEach(function(a){all[a]=1});Object.keys(TEMPLATE.fills).forEach(function(a){all[a]=1});
+  var inBox=function(a){var m=/([A-Z]+)(\d+)/.exec(a),c=XLSX.utils.decode_col(m[1]),r=+m[2]-1;return boxes.some(function(b){var R=XLSX.utils.decode_range(b);return c>=R.s.c&&c<=R.e.c&&r>=R.s.r&&r<=R.e.r})};
+  var bold={};TEMPLATE.bold.forEach(function(a){bold[a]=1});
+  Object.keys(all).forEach(function(a){
+    var v=cells[a],c;
+    if(v&&typeof v==='object'&&v.date)c={t:'n',v:_serial(v.date),z:'dd-mmm-yyyy'};
+    else if(typeof v==='string'&&v.charAt(0)==='=')c={t:'n',f:v.slice(1)};
+    else if(typeof v==='number')c={t:'n',v:v};
+    else if(v===undefined||v==='')c={t:'s',v:''};
+    else c={t:'s',v:String(v)};
+    var s={font:{sz:10,bold:!!bold[a]},alignment:{vertical:'center',wrapText:true}};
+    if(TEMPLATE.fills[a])s.fill={patternType:'solid',fgColor:{rgb:TEMPLATE.fills[a].slice(1)}};
+    if(inBox(a))s.border=_thin();
+    if(c.t==='n'&&!c.z)c.z='#,##0;[Red]-#,##0';
+    c.s=s;ws[a]=c;
+  });
+  ws['!ref']='A1:T56';
+  ws['!merges']=TEMPLATE.merges.map(function(m){return XLSX.utils.decode_range(m)});
+  ws['!cols']=Object.keys(TEMPLATE.widths).map(function(k){return{wpx:TEMPLATE.widths[k]}});
+  return ws;
+}
+var SUM_HEAD=['Date','Day','Gross Sales w/o GST','GST','Discount','Sale Return','Total Net Sales','Credit Sales','Cash Sales','Supplier Payments','Petty Cash Expense','Net Cash Sales (expected)','Cash in Till','Excess/Short','Revision','Sheet'];
+function buildWorkbook(outlet,docs){
+  docs=docs.slice().sort(function(a,b){return a.date<b.date?-1:1});
+  var wb=XLSX.utils.book_new(),rows=[SUM_HEAD];
+  var sumWs={};
+  var hs={font:{bold:true,color:{rgb:'FFFFFF'}},fill:{patternType:'solid',fgColor:{rgb:'C82620'}},alignment:{wrapText:true,vertical:'center'}};
+  SUM_HEAD.forEach(function(h,i){sumWs[XLSX.utils.encode_cell({r:0,c:i})]={t:'s',v:h,s:hs}});
+  var names=[];
+  docs.forEach(function(x,i){
+    var d=x.d,r=dsrCalc(d),T=r.tot,nm=x.date.slice(8,10)+'-'+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+x.date.slice(5,7)-1];
+    names.push(nm);
+    var vals=[{t:'n',v:_serial(x.date),z:'dd-mmm-yyyy'},d.dayName,T.gross,T.gst,T.disc,T.ret,T.tnet,T.credit,T.cash,r.supplier,r.pettyCashExpense,r.netCash,r.cashInTill,r.diff,x.revision||1,nm];
+    vals.forEach(function(v,c){var cell=(v&&typeof v==='object')?v:(typeof v==='number'?{t:'n',v:v}:{t:'s',v:String(v)});if(cell.t==='n'&&!cell.z)cell.z='#,##0;[Red]-#,##0';sumWs[XLSX.utils.encode_cell({r:i+1,c:c})]=cell});
+  });
+  if(docs.length){
+    var t=docs.length+1;sumWs[XLSX.utils.encode_cell({r:t,c:0})]={t:'s',v:'TOTAL',s:{font:{bold:true}}};
+    for(var c=2;c<=13;c++){var col=XLSX.utils.encode_col(c);sumWs[XLSX.utils.encode_cell({r:t,c:c})]={t:'n',f:'SUM('+col+'2:'+col+(docs.length+1)+')',z:'#,##0;[Red]-#,##0',s:{font:{bold:true}}}}
+  }
+  sumWs['!ref']='A1:P'+(docs.length+2);sumWs['!cols']=SUM_HEAD.map(function(){return{wpx:100}});
+  XLSX.utils.book_append_sheet(wb,sumWs,'Month Summary');
+  docs.forEach(function(x,i){XLSX.utils.book_append_sheet(wb,buildDaySheet(x.d,outlet),names[i])});
+  return wb;
+}
+function emailHtml(o,d,r,rev,mgr,morn){
+  var f=function(n){return Math.round(n).toLocaleString('en-US')},T=r.tot,E=function(s){return String(s==null?'':s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})};
+  var st=r.status==='OK'?'Cash OK':(r.status==='SHORT'?'CASH SHORT Rs '+f(-r.diff):'CASH OVER Rs '+f(r.diff)),col=r.status==='OK'?'#2e7d32':(r.status==='SHORT'?'#c62828':'#ef6c00');
+  var row=function(a,b,B){return '<tr><td style="padding:5px 10px;border-bottom:1px solid #eee;'+(B?'font-weight:bold;':'')+'">'+a+'</td><td align="right" style="padding:5px 10px;border-bottom:1px solid #eee;'+(B?'font-weight:bold;':'')+'">'+b+'</td></tr>'};
+  var dp=d.dept||{},am=function(k){return f(Number((dp[k]||{}).amt)||0)};
+  return '<div style="font-family:Arial,sans-serif;max-width:560px"><h2 style="margin:0">Daily Sales Report - '+E(o)+'</h2><div style="color:#555;margin-bottom:10px">'+d.dayName+', '+d.date+(rev>1?' &middot; <b>Revision '+rev+'</b>':'')+'</div>'+
+  '<div style="background:'+col+';color:#fff;padding:10px 14px;font-size:18px;font-weight:bold;border-radius:6px">'+st+'</div><table style="border-collapse:collapse;width:100%;margin-top:10px;font-size:14px">'+
+  row('Gross sales (w/o GST)',f(T.gross))+row('GST',f(T.gst))+row('Discount','- '+f(T.disc))+row('Sale return','- '+f(T.ret))+row('Entertainment','- '+f(T.ent))+row('Total net sales',f(T.tnet),1)+(morn!=null&&!isNaN(morn)?row('Morning sales (reported at 6pm)',f(morn))+row('Evening sales',f(T.tnet-morn)):'')+
+  row('Card',f(T.card))+row('Food Panda',f(T.fp))+row('UAN credit',f(T.uan))+row('PPL voucher',f(T.ppl))+row('Total credit sales',f(T.credit),1)+row('Cash sales',f(T.cash),1)+
+  row('Supplier / local payments','- '+f(r.supplier))+row('Petty cash, advances &amp; other expenses','- '+f(r.pettyCashExpense))+row('Net cash expected',f(r.netCash),1)+row('Cash in till',f(r.cashInTill),1)+
+  row('Excess / (Short)',r.diff<0?'('+f(-r.diff)+')':f(r.diff),1)+'</table><div style="margin-top:10px;font-size:14px">Takeaway '+am('takeaway')+' &middot; Dine-in '+am('dine')+' &middot; Delivery '+am('delivery')+' ('+r.deptOrders+' orders)</div>'+
+  (r.warnings.length?'<div style="margin-top:10px;color:#ef6c00;font-size:13px"><b>Notes:</b><br>'+r.warnings.map(E).join('<br>')+'</div>':'')+
+  (d.remarks?'<div style="margin-top:10px;font-size:14px"><b>Manager remarks:</b><br>'+E(d.remarks).replace(/\n/g,'<br>')+'</div>':'')+
+  '<div style="margin-top:14px;color:#777;font-size:12px">Monthly workbook attached (one sheet per day).'+(mgr?' Submitted by '+E(mgr)+'.':'')+'</div></div>';
+}
+var $=function(s){return document.querySelector(s)};
+var SALES=[['gross','Gross Sales w/o GST'],['gst','Sales Tax (GST)'],['disc','Discount'],['ret','Sale Return'],['ent','Entertainment'],['card','Card Sale (Settlement)'],['fp','Food Panda Delivery Sale'],['uan','UAN Credit Sale'],['ppl','PPL Voucher']];
+var FIXED=[['delivery','Delivery Charges'],['foodgo','FoodGo Delivery / Extra Charges'],['service','Service Charges'],['tip','Tip'],['rider','Rider Commission'],['rent','Quarter Rent']];
+var DEN=[5000,1000,500,100,50,20,10,5],CDEN=[5000,1000,500,100,50,20,10];
+var LISTS={
+ petty:{t:'Petty Cash Expenses',max:26,cols:[{k:'item',p:'Item'},{k:'amt',p:'Amount',n:1}]},
+ supplier:{t:'Supplier / Local PI Payments',max:17,cols:[{k:'pi',p:'PI #'},{k:'vendor',p:'Vendor / item'},{k:'amt',p:'Amount',n:1}]},
+ advances:{t:'Advances & Salaries',max:14,cols:[{k:'dept',p:'Dept'},{k:'name',p:'Name'},{k:'amt',p:'Amount',n:1}]},
+ penalties:{t:'Cash Short Penalty',max:3,cols:[{k:'id',p:'ID #'},{k:'name',p:'Name'},{k:'amt',p:'Amount',n:1}]},
+ vouchers:{t:'Vouchers Approved From Head Office',max:4,cols:[{k:'item',p:'Voucher'},{k:'amt',p:'Amount',n:1}]},
+ otherCash:{t:'Customer Advance Redeemed / other settlements',max:3,cols:[{k:'occasion',p:'Occasion'},{k:'name',p:'Name'},{k:'amt',p:'Amount',n:1}]},
+ custAdv:{t:'Advance Payment - Customer',max:3,cols:[{k:'name',p:'Name / cell #'},{k:'date',p:'Date'},{k:'amt',p:'Amount',n:1}]},
+ slips:{t:'Slips',max:3,cols:[{k:'ref',p:'Slip'},{k:'amt',p:'Amount',n:1}]},
+ discarded:{t:'Discarded Items',max:9,cols:[{k:'item',p:'Item'},{k:'qty',p:'Qty',n:1}]}
+};
+function today(){var d=new Date();if(d.getHours()<6)d.setDate(d.getDate()-1);return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function fmt(n){return Math.round(n).toLocaleString('en-US')}
+function key(){return 'dsr:'+INFO.outlet+':'+S.date}
+function blank(date){var s={date:date,t1:{},t2:{},fixed:{},denoms:{},changeDenoms:{},dept:{takeaway:{},dine:{},delivery:{}},received:{},cancelled:{},cogs:{},remarks:'',discardedAmt:'',floatAmt:INFO.floatAmt};
+ Object.keys(LISTS).forEach(function(k){s[k]=[]});s.meters=INFO.meters.map(function(m){return{name:m.name,last:m.last,morning:'',evening:'',night:''}});return s}
+function save(){try{localStorage.setItem(key(),JSON.stringify(S))}catch(e){}}
+function load(date){var s=null;try{s=JSON.parse(localStorage.getItem('dsr:'+INFO.outlet+':'+date))}catch(e){}return s}
+
+function num(path,ph){return '<input type="number" inputmode="decimal" step="any" data-p="'+path+'" value="'+esc(get(path))+'" placeholder="'+(ph||'')+'">'}
+function get(path){var o=S,a=path.split('.');for(var i=0;i<a.length;i++){if(o==null)return'';o=o[a[i]]}return o==null?'':o}
+function setp(path,v){var o=S,a=path.split('.');for(var i=0;i<a.length-1;i++){var k=a[i];if(o[k]==null)o[k]={};o=o[k]}o[a[a.length-1]]=v}
+function card(id,title,html,tick){return '<div class="card'+(OPEN[id]?' open':'')+'" data-id="'+id+'"><h3>'+title+'<span class="tick">'+(tick||'')+'</span></h3><div class="body">'+html+'</div></div>'}
+function sum(a,k){return (a||[]).reduce(function(s,r){return s+(Number(r[k])||0)},0)}
+function listHtml(k){var L=LISTS[k],h='<div class="sub">'+L.t+(L.max?' (max '+L.max+')':'')+'</div>';
+ (S[k]||[]).forEach(function(r,i){var cols=L.cols.length;h+='<div class="row" style="grid-template-columns:'+L.cols.map(function(c){return c.n?'88px':'1fr'}).join(' ')+' 40px">'+L.cols.map(function(c){return '<input '+(c.n?'type="number" inputmode="decimal" step="any"':'type="text"')+' data-l="'+k+'" data-i="'+i+'" data-k="'+c.k+'" placeholder="'+c.p+'" value="'+esc(r[c.k])+'">'}).join('')+'<button class="x" data-del="'+k+'" data-i="'+i+'">✕</button></div>'});
+ if((S[k]||[]).length<L.max)h+='<button class="sec add" data-add="'+k+'">+ Add</button>';
+ var t=L.cols.some(function(c){return c.k==='amt'})&&(S[k]||[]).length?'<div class="total"><span>Total</span><span data-tot="'+k+'">'+fmt(sum(S[k],'amt'))+'</span></div>':'';return h+t}
+function viewForm(){
+ var m=['<div class="g2"><div><label>Date</label><input type="date" id="dt" value="'+S.date+'" max="'+today()+'"></div><div><label>Outlet</label><input value="'+esc(INFO.outlet)+'" disabled></div></div>'];
+ var sales='<div class="grid"><div></div><div class="h">Terminal 1</div><div class="h">Terminal 2</div>'+SALES.map(function(r){return '<div class="l">'+r[1]+'</div>'+num('t1.'+r[0])+num('t2.'+r[0])}).join('')+'</div><p class="sub">Copy from the POS closing report of each terminal. GST: T1 = FBR GST, T2 = GST 2.</p>';
+ var fixed=FIXED.map(function(r){return '<label>'+r[1]+'</label>'+num('fixed.'+r[0])}).join('');
+ var cash='<div class="sub">Count the notes in the till</div><div class="grid" style="grid-template-columns:70px 1fr 90px">'+DEN.map(function(v){var q=Number(get('denoms.'+v))||0;return '<div class="l">'+v+' ×</div>'+num('denoms.'+v,'qty')+'<div style="text-align:right" data-den="denoms.'+v+'" data-v="'+v+'">'+fmt(v*q)+'</div>'}).join('')+'<div class="l">Coins</div>'+num('denoms.coins','Rs')+'<div></div></div>'+'<div class="sub" style="margin-top:12px">'+LISTS.otherCash.t+' - counted as cash in till</div>'+listHtml('otherCash');
+ var chg='<label>Float amount</label>'+num('floatAmt')+'<div class="sub">Change money in hand</div><div class="grid" style="grid-template-columns:70px 1fr 90px">'+CDEN.map(function(v){var q=Number(get('changeDenoms.'+v))||0;return '<div class="l">'+v+' ×</div>'+num('changeDenoms.'+v,'qty')+'<div style="text-align:right" data-den="changeDenoms.'+v+'" data-v="'+v+'">'+fmt(v*q)+'</div>'}).join('')+'</div>'+listHtml('slips');
+ var dept='<div class="grid" style="grid-template-columns:1fr 80px 1fr"><div></div><div class="h">Orders</div><div class="h">Amount</div>'+[['takeaway','Takeaway'],['dine','Dine in'],['delivery','Delivery']].map(function(r){return '<div class="l">'+r[1]+'</div>'+num('dept.'+r[0]+'.orders')+num('dept.'+r[0]+'.amt')}).join('')+'</div><p class="sub">The three amounts must add up to Gross Sales w/o GST.</p><div class="g2"><div><label>UAN orders received</label>'+num('received.uan')+'</div><div><label>Food Panda orders received</label>'+num('received.fp')+'</div><div><label>UAN orders cancelled</label>'+num('cancelled.uan')+'</div><div><label>Food Panda cancelled</label>'+num('cancelled.fp')+'</div></div>'+'<div class="sub" style="margin-top:10px">Store (COGS)</div><div class="g2"><div><label>Goods issued from store</label>'+num('cogs.issued')+'</div><div><label>Less: IC production</label>'+num('cogs.ic')+'</div><div><label>Less: Meat production</label>'+num('cogs.meat')+'</div></div>';
+ var util=S.meters.length?S.meters.map(function(mm,i){return '<div style="margin-bottom:8px"><b>'+esc(mm.name)+'</b><div class="g2"><div><label>Last night</label>'+num('meters.'+i+'.last')+'</div><div><label>Morning</label>'+num('meters.'+i+'.morning')+'</div><div><label>Evening</label>'+num('meters.'+i+'.evening')+'</div><div><label>Night (closing)</label>'+num('meters.'+i+'.night')+'</div></div></div>'}).join(''):'<p class="sub">No meters set for this outlet.</p>';
+ var disc=listHtml('discarded')+'<label>Discarded items total amount</label>'+num('discardedAmt');
+ var rem='<textarea id="rem" rows="4" placeholder="Anything the Directors should know today">'+esc(S.remarks)+'</textarea>';
+ $('#app').innerHTML='<header><div><b>'+esc(INFO.outlet)+'</b><br><small>Closing Sales Report</small></div><button class="sec" id="out" style="padding:8px 12px">Home</button></header><div class="wrap">'+m[0]+
+  card('sales','1. Sales (POS closing report)',sales)+card('fixed','2. Delivery & other charges',fixed)+card('petty','3. Petty cash expenses',listHtml('petty'))+card('supplier','4. Supplier / PI payments',listHtml('supplier'))+
+  card('adv','5. Advances & salaries',listHtml('advances'))+card('pen','6. Cash short penalty',listHtml('penalties'))+card('vou','7. Head office vouchers',listHtml('vouchers'))+
+  card('cash','8. Cash in till',cash)+card('chg','9. Change money float',chg)+card('dept','10. Department report & orders',dept)+card('cust','11. Customer advance payments',listHtml('custAdv'))+card('disc','12. Discarded items',disc)+card('util','13. Utility meters',util)+card('rem','14. Manager remarks',rem)+
+  '</div><div class="bar"><button id="fin">Finalise</button></div>';
+ wire()}
+function wire(){
+ $('#out').onclick=function(){viewOutlet(INFO.outlet)};
+ document.querySelectorAll('.card>h3').forEach(function(h){h.onclick=function(){var c=h.parentNode,id=c.dataset.id;OPEN[id]=!OPEN[id];c.classList.toggle('open')}});
+ document.querySelectorAll('input[data-p]').forEach(function(i){i.oninput=function(){setp(i.dataset.p,i.value);FINAL=null;save();upd()}});
+ document.querySelectorAll('input[data-l]').forEach(function(i){i.oninput=function(){S[i.dataset.l][+i.dataset.i][i.dataset.k]=i.value;FINAL=null;save();upd()}});
+ document.querySelectorAll('[data-add]').forEach(function(b){b.onclick=function(){var k=b.dataset.add,r={};LISTS[k].cols.forEach(function(c){r[c.k]=''});S[k].push(r);save();rerender()}});
+ document.querySelectorAll('[data-del]').forEach(function(b){b.onclick=function(){S[b.dataset.del].splice(+b.dataset.i,1);save();rerender()}});
+ $('#rem').oninput=function(){S.remarks=this.value;save()};
+ $('#dt').onchange=function(){if(this.value){save();start(this.value)}};
+ $('#fin').onclick=finalise}
+function upd(){document.querySelectorAll('[data-den]').forEach(function(e){e.textContent=fmt(e.dataset.v*(Number(get(e.dataset.den))||0))});document.querySelectorAll('[data-tot]').forEach(function(e){e.textContent=fmt(sum(S[e.dataset.tot],'amt'))})}
+function rerender(){var y=window.scrollY;viewForm();window.scrollTo(0,y)}
+
+
+var PRIV=false,PILOT='FUSE',AS=null,DB=null,MCP=null,DL=null,CFG=null,INFO=null,S=null,FINAL=null,OPEN={sales:1},EXISTING=null,BUSY=false,MORN=null;
+var MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],DAYN=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+var DEFAULTS={directors:['jawadkalia80@gmail.com','adeelferoz@gmail.com','kaybeemachinery2@gmail.com'],outlets:{
+ 'Kaybees Gulshan':{meters:[],floatAmt:30000},
+ 'Kaybees North':{meters:['TL45609','TL45610','TL45611','TO-17584','TO-17574','Generator Outlet','Generator Store','LPG'],floatAmt:30000},
+ 'Kaybees Johar':{meters:[],floatAmt:30000},
+ 'FUSE Seher':{meters:['TY24061','LPG','Generator Outlet'],floatAmt:30000},
+ 'FUSE Johar':{meters:[],floatAmt:30000},
+ 'FUSE @ Yard':{meters:[],floatAmt:30000},
+ 'FUSE Lucky One':{meters:[],floatAmt:30000}}};
+
+function pilotKeys(){var S0=window.__SESSION;return Object.keys(CFG.outlets).filter(function(k){return k.indexOf(PILOT)===0&&(!S0||S0.role==='director'||S0.outlet===k)})}
+var LOGO_URI='data:image/png;base64,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';
+function brandEl(){return '<img class="lg" alt="FUSE" src="'+(CFG&&CFG.logo?'/_blob/'+CFG.logo:LOGO_URI)+'" onerror="if(this.src!==LOGO_URI){this.src=LOGO_URI}">'}
+function brandAll(){var h=document.querySelector('#app header>div:first-child');if(!h||h.querySelector('.lg,.wm'))return;var inner=document.createElement('div');while(h.firstChild)inner.appendChild(h.firstChild);h.appendChild(inner);h.insertAdjacentHTML('afterbegin',brandEl())}
+function sl(n){return String(n).replace(/[^A-Za-z0-9]+/g,'_')}
+function dbErr(e){return (e&&(e.message||e.code))||String(e)}
+async function init(){
+ try{DB=await claude.use('db')}catch(e){DB=null}
+ try{MCP=await claude.use('mcp')}catch(e){MCP=null}
+ try{AS=await claude.use('assets')}catch(e){AS=null}
+ try{DL=await claude.use('downloads')}catch(e){DL=null}
+ CFG=JSON.parse(JSON.stringify(DEFAULTS));
+ if(DB){try{var s=await DB.doc('config/main').get();if(s.exists){var c=s.data();if(c.directors)CFG.directors=c.directors;if(c.walk)CFG.walk=c.walk;if(c.closing)CFG.closing=c.closing;if(c.ck)CFG.ck=c.ck;if(c.logo)CFG.logo=c.logo;if(c.ops)CFG.ops=c.ops;if(c.req)CFG.req=c.req;if(c.outlets)Object.keys(c.outlets).forEach(function(k){CFG.outlets[k]=c.outlets[k]})}}catch(e){}}
+ try{var U=await claude.use('user');if(U){var me=await U.me(),em=String(me.email||'').toLowerCase(),al=(CFG.directors||[]).concat(CFG.ops||[]).map(function(x){return String(x).toLowerCase()});PRIV=!!(me.isOwner||me.canEdit||(em&&al.indexOf(em)>=0))}}catch(e){PRIV=false}
+ viewHome()}
+function note(m,c){return '<div class="'+(c||'warn')+'">'+m+'</div>'}
+function viewHome(msg){
+ var mo=today().slice(0,7);
+ $('#app').innerHTML='<header><div><b>Manager\'s Portal</b><br><small>FUSE</small></div>'+(PRIV?'<button class="sec" id="st" style="padding:8px 12px">Settings</button>':'')+'</header><div class="wrap">'+(msg||'')+(DB?'':note('Not signed in to claude.ai - entries cannot be saved or submitted. Open this page signed in.','err'))+
+ '<div class="card open"><h3>Select outlet</h3><div class="body">'+pilotKeys().map(function(o){return '<button class="o" data-o="'+esc(o)+'" style="width:100%;margin-bottom:8px;font-size:18px;padding:16px">'+esc(o)+'</button>'}).join('')+'</div></div>'+
+ (PRIV?'<div class="card open"><h3>Monthly Excel file</h3><div class="body"><div class="g2"><div><label>Outlet</label><select id="mo">'+pilotKeys().map(function(o){return '<option>'+esc(o)+'</option>'}).join('')+'</select></div><div><label>Month</label><input type="month" id="mm" value="'+mo+'"></div></div><button class="sec add" id="dl" style="margin-top:10px">Download month workbook</button><div id="dlmsg" class="sub"></div></div></div>':'')+'</div>';
+ document.querySelectorAll('.o').forEach(function(b){b.onclick=function(){viewOutlet(b.dataset.o)}});
+ if($('#st'))$('#st').onclick=viewSettings;if($('#dl'))$('#dl').onclick=function(){downloadMonth($('#mo').value,$('#mm').value,$('#dlmsg'))}}
+function viewOutlet(o,msg){
+ $('#app').innerHTML='<header><div><b>'+esc(o)+'</b><br><small>'+today()+'</small></div><button class="sec" id="bk" style="padding:8px 12px">Home</button></header><div class="wrap">'+(msg||'')+(DB?'':note('Not signed in to claude.ai - entries cannot be saved or submitted.','err'))+
+ '<button id="m0" style="width:100%;margin-bottom:10px;padding:18px;font-size:18px;text-align:left;background:#fff;color:#1b1b1b;box-shadow:0 1px 3px #0002">🚶 Manager Walk<br><small id="ws" style="font-weight:400;color:#777">before opening</small></button>'+
+ '<button id="m1" style="width:100%;margin-bottom:10px;padding:18px;font-size:18px;text-align:left;background:#fff;color:#1b1b1b;box-shadow:0 1px 3px #0002">☀️ Morning sales check-in<br><small id="ms" style="font-weight:400;color:#777">due at 6pm</small></button>'+
+ '<button id="m5" style="width:100%;margin-bottom:10px;padding:18px;font-size:18px;text-align:left;background:#fff;color:#1b1b1b;box-shadow:0 1px 3px #0002">&#128230; Warehouse Requisition / Demand<br><small id="qs" style="font-weight:400;color:#777">items needed from commissary &amp; store</small></button>'+
+ '<button id="m3" style="width:100%;margin-bottom:10px;padding:18px;font-size:18px;text-align:left;background:#fff;color:#1b1b1b;box-shadow:0 1px 3px #0002">📦 Closing counts<br><small id="cs" style="font-weight:400;color:#777">Meat, beverages &amp; ice cream balances</small></button>'+
+ '<button id="m2" style="width:100%;margin-bottom:10px;padding:18px;font-size:18px;text-align:left">📋 Closing Sales Report<br><small style="font-weight:400;opacity:.85">Closing report, cash count &amp; submit</small></button>'+
+ '<button id="m4" style="width:100%;margin-bottom:10px;padding:18px;font-size:18px;text-align:left;background:#fff;color:#1b1b1b;box-shadow:0 1px 3px #0002">✅ Closing Checklist<br><small id="ks" style="font-weight:400;color:#777">all closing tasks'+(new Date().getDay()===1?' + Monday deep cleaning':'')+'</small></button>'+
+ (PRIV?'<div class="card open"><h3>Monthly Excel file</h3><div class="body"><label>Month</label><input type="month" id="mm" value="'+today().slice(0,7)+'"><button class="sec add" id="dl" style="margin-top:10px">Download month workbook</button><div id="dlmsg" class="sub"></div></div></div>':'')+'</div>';
+ $('#bk').onclick=function(){viewHome()};$('#m0').onclick=function(){viewWalk(o)};$('#m1').onclick=function(){viewMorning(o)};$('#m3').onclick=function(){viewClosing(o)};$('#m5').onclick=function(){viewReq(o)};$('#m2').onclick=function(){startOutlet(o)};$('#m4').onclick=function(){viewWalk(o,'ck')};if($('#dl'))$('#dl').onclick=function(){downloadMonth(o,$('#mm').value,$('#dlmsg'))};
+ if(DB)DB.doc('walk/'+sl(o)+'_'+today()).get().then(function(s){var e=$('#ws');if(!e)return;if(s.exists){var m=s.data().summary||{};e.textContent='Done today: '+m.yes+' Yes, '+m.no+' No, '+m.na+' N/A ✓';e.style.color=m.no?'#c62828':'#2e7d32';e.style.fontWeight='700'}else e.textContent='Not done today'}).catch(function(){});
+ if(DB)DB.doc('cklist/'+sl(o)+'_'+today()).get().then(function(s){var e=$('#ks');if(!e)return;if(s.exists){var m=s.data().summary||{};e.textContent='Done today: '+m.yes+' Yes, '+m.no+' No, '+m.na+' N/A ✓';e.style.color=m.no?'#c62828':'#2e7d32';e.style.fontWeight='700'}else{e.textContent='Not done today';e.style.color='#777'}}).catch(function(){});
+ if(DB)DB.doc('req/'+sl(o)+'_'+nextDate(today())).get().then(function(s){var e=$('#qs');if(!e)return;if(s.exists){var m=s.data();if(m.status==='draft'){e.textContent='Draft saved ('+m.count+' item'+(m.count===1?'':'s')+') - not sent yet';e.style.color='#ef6c00';e.style.fontWeight='700'}else{e.textContent='Sent for tomorrow: '+m.count+' item'+(m.count===1?'':'s')+' ✓';e.style.color='#2e7d32';e.style.fontWeight='700'}}else{e.textContent='Nothing for tomorrow yet';e.style.color='#777'}}).catch(function(){});
+ if(DB)DB.doc('closing/'+sl(o)+'_'+today()).get().then(function(s){var e=$('#cs');if(!e)return;if(s.exists){e.textContent='Submitted today ✓';e.style.color='#2e7d32';e.style.fontWeight='700'}else e.textContent='Not submitted today'}).catch(function(){});
+ if(DB)DB.doc('morning/'+sl(o)+'_'+today()).get().then(function(s){var e=$('#ms');if(!e)return;if(s.exists){e.textContent='Rs '+fmt(s.data().total)+' entered today ✓';e.style.color='#2e7d32';e.style.fontWeight='700'}else e.textContent='Not entered today - due at 6pm'}).catch(function(){})}
+function viewMorning(o){
+ var date=today();
+ $('#app').innerHTML='<header><div><b>'+esc(o)+'</b><br><small>Morning sales check-in</small></div><button class="sec" id="bk" style="padding:8px 12px">Back</button></header><div class="wrap"><div class="card open"><div class="body"><label>Date</label><input type="date" id="md" value="'+date+'" max="'+date+'"><label>Morning shift total sales (Rs) - the figure you quote</label><input type="number" inputmode="decimal" id="mt" step="any" placeholder="e.g. 85000"><div class="g2"><div><label>Dine in sales (Rs)</label><input type="number" inputmode="decimal" id="mdi" step="any" placeholder="0"></div><div><label>Take away sales (Rs)</label><input type="number" inputmode="decimal" id="mta" step="any" placeholder="0"></div><div><label>Delivery sales (Rs)</label><input type="number" inputmode="decimal" id="mdl" step="any" placeholder="0"></div><div><label>Running tables (Rs)</label><input type="number" inputmode="decimal" id="mrt" step="any" placeholder="0"></div></div><div class="sub" id="mchk"></div><label>Note (optional)</label><input id="mn" placeholder="Anything unusual this morning"><div id="mm2" style="margin-top:10px"></div></div></div></div><div class="bar"><button id="ms">Save morning sales</button></div>';
+ $('#bk').onclick=function(){viewOutlet(o)};
+ var chk=function(){var a=Number($('#mdi').value)||0,b=Number($('#mta').value)||0,c=Number($('#mdl').value)||0,t=Number($('#mt').value)||0,sum=a+b+c,e=$('#mchk');e.style.color=(t&&sum&&Math.abs(sum-t)>0.5)?'#c62828':'#777';e.textContent=sum?'Dine in + Take away + Delivery = Rs '+fmt(sum)+(t?(Math.abs(sum-t)>0.5?' (differs from total by Rs '+fmt(Math.abs(sum-t))+')':' - matches total'):''):''};
+ ['mt','mdi','mta','mdl'].forEach(function(i){$('#'+i).oninput=chk});
+ var loadDay=async function(){if(!DB)return;try{var s=await DB.doc('morning/'+sl(o)+'_'+$('#md').value).get();if(s.exists){var v=s.data();$('#mt').value=v.total;$('#mdi').value=v.dineIn==null?'':v.dineIn;$('#mta').value=v.takeaway==null?'':v.takeaway;$('#mdl').value=v.delivery==null?'':v.delivery;$('#mrt').value=v.running==null?'':v.running;$('#mn').value=v.note||'';chk();$('#mm2').innerHTML=note('Already entered for this day - saving again replaces it.')}else{$('#mm2').innerHTML=''}}catch(e){}};
+ $('#md').onchange=function(){['mt','mdi','mta','mdl','mrt'].forEach(function(i){$('#'+i).value=''});$('#mn').value='';chk();loadDay()};loadDay();
+ $('#ms').onclick=async function(){var t=Number($('#mt').value);if(!t){$('#mm2').innerHTML=note('Enter the morning sales figure.','err');return}
+  var f={dineIn:'mdi',takeaway:'mta',delivery:'mdl',running:'mrt'},nm={dineIn:'Dine in',takeaway:'Take away',delivery:'Delivery',running:'Running tables'},fv={};
+  for(var k in f){var raw=$('#'+f[k]).value;if(raw===''||isNaN(Number(raw))||Number(raw)<0){$('#mm2').innerHTML=note('Enter '+nm[k]+' (type 0 if none).','err');return}fv[k]=Number(raw)}
+  this.disabled=true;try{if(!DB)throw new Error('Not signed in');await DB.doc('morning/'+sl(o)+'_'+$('#md').value).set({outlet:o,date:$('#md').value,total:t,dineIn:fv.dineIn,takeaway:fv.takeaway,delivery:fv.delivery,running:fv.running,note:$('#mn').value,enteredAt:new Date().toISOString()});viewOutlet(o,note('Morning sales saved for '+esc(o)+': Rs '+fmt(t),'ok" style="padding:10px;color:#fff;border-radius:8px;margin-bottom:8px'))}catch(e){this.disabled=false;$('#mm2').innerHTML=note('Could not save: '+esc(dbErr(e)),'err')}}}
+async function startOutlet(o){
+ var cf=CFG.outlets[o],last={};
+ if(DB){try{var s=await DB.doc('meters/'+sl(o)).get();if(s.exists)last=s.data().map||{}}catch(e){}}
+ INFO={outlet:o,floatAmt:cf.floatAmt,meters:(cf.meters||[]).map(function(m){return{name:m,last:last[m]==null?'':last[m]}})};
+ start(today())}
+async function start(date){
+ var d=load(date);EXISTING=null;
+ if(DB){try{var s=await DB.doc('dsr/'+sl(INFO.outlet)+'_'+date).get();if(s.exists)EXISTING=s.data()}catch(e){}}
+ if(d){S=d}else if(EXISTING&&EXISTING.d){S=EXISTING.d}else S=blank(date);
+ S.meters=INFO.meters.map(function(m){var o=(S.meters||[]).filter(function(x){return x.name===m.name})[0];return o||{name:m.name,last:m.last,morning:'',evening:'',night:''}});
+ FINAL=null;viewForm();
+ if(EXISTING)$('.wrap').insertAdjacentHTML('afterbegin',note('A DSR for this day was already submitted (revision '+(EXISTING.revision||1)+'). Submitting again will replace it and the email is marked REVISED.'))}
+function viewSettings(){
+ var o=CFG.outlets;
+ $('#app').innerHTML='<header><div><b>Settings</b></div><button class="sec" id="bk" style="padding:8px 12px">Back</button></header><div class="wrap"><div class="card open"><h3>Directors (email recipients)</h3><div class="body"><textarea id="dir" rows="4">'+esc(CFG.directors.join('\n'))+'</textarea><div class="sub">One email per line. Directors and anyone with Editor access can see the Monthly Excel file and Settings.</div><label>Operations Manager email(s) (can also see the Monthly Excel file and Settings)</label><textarea id="ops" rows="2">'+esc((CFG.ops||[]).join('\n'))+'</textarea></div></div>'+
+ pilotKeys().map(function(k){return '<div class="card open"><h3>'+esc(k)+'</h3><div class="body"><label>Electricity / gas meters (comma separated, max 8)</label><input data-m="'+esc(k)+'" value="'+esc((o[k].meters||[]).join(', '))+'"><label>Change money float (Rs)</label><input type="number" data-f="'+esc(k)+'" value="'+esc(o[k].floatAmt)+'"></div></div>'}).join('')+
+ '<div class="card open"><h3>Manager Walk checklist</h3><div class="body"><textarea id="wl" rows="14">'+esc(CFG.walk||WALK_DEFAULT)+'</textarea><div class="sub">One item per line. Start a line with ## for a section heading. Add [temp] at the end of a line to ask for a number (e.g. a temperature) instead of Yes / No. Add [mon] (or [tue], [wed]...) to show an item only on that day.</div></div></div>'+
+ ''+(AS?'<div class="card open"><h3>Logo</h3><div class="body"><div id="lgp">'+(CFG.logo?'<img class="lg" style="height:56px;padding:4px" src="/_blob/'+CFG.logo+'">':'<div class="sub">Default FUSE logo is in use.</div>')+'</div><label class="pa" style="margin-top:8px">&#128247; Upload FUSE logo<input type="file" accept="image/png,image/jpeg,image/webp" id="lgf" hidden></label><div class="sub">Square PNG works best. Applies to everyone after you save settings.</div></div></div>':'')+'<div class="card open"><h3>Warehouse Requisition items</h3><div class="body"><textarea id="rl" rows="16">'+esc(CFG.req||REQ_DEFAULT)+'</textarea><div class="sub">The items managers can request every day. One per line as: Item | unit. Start a line with ## for a section heading.</div></div></div>'+
+ '<div class="card open"><h3>Closing counts items</h3><div class="body"><textarea id="cl" rows="14">'+esc(CFG.closing||CLOSE_DEFAULT)+'</textarea><div class="sub">One item per line as: Item | unit. Start a line with ## for a department heading.</div></div></div>'+
+ '<div class="card open"><h3>Closing Checklist</h3><div class="body"><textarea id="kl" rows="16">'+esc(CFG.ck||CK_DEFAULT)+'</textarea><div class="sub">One task per line. ## for a section heading. Add [mon] at the end of a line for tasks only needed on Mondays (deep cleaning); [tue], [wed] etc. also work.</div></div></div><div id="sm"></div></div><div class="bar"><button id="sv">Save settings</button></div>';
+ $('#bk').onclick=function(){viewHome()};
+ if($('#lgf'))$('#lgf').onchange=async function(){var f=this.files[0];if(!f)return;try{var r=await AS.upload(f,{type:f.type});CFG.logo=r.id;$('#lgp').innerHTML='<img class="lg" style="height:56px;background:#C82620;padding:4px" src="/_blob/'+r.id+'"><div class="sub">Uploaded - press Save settings.</div>'}catch(e){$('#sm').innerHTML=note('Logo not uploaded: '+esc(dbErr(e)),'err')}};
+ $('#sv').onclick=async function(){
+  var dirs=$('#dir').value.split(/[\s,;]+/).map(function(x){return x.trim()}).filter(function(x){return /@/.test(x)});
+  var ops=$('#ops').value.split(/[\s,;]+/).map(function(x){return x.trim()}).filter(function(x){return /@/.test(x)});
+  var out={};Object.keys(o).forEach(function(k){var me=document.querySelector('[data-m="'+k+'"]');if(!me){out[k]=o[k];return}out[k]={meters:me.value.split(',').map(function(x){return x.trim()}).filter(String).slice(0,8),floatAmt:Number(document.querySelector('[data-f="'+k+'"]').value)||0}});
+  try{if(!DB)throw new Error('Not signed in');var wl=$('#wl').value.trim();await DB.doc('config/main').set({directors:dirs,outlets:out,walk:wl,closing:$('#cl').value.trim(),ck:$('#kl').value.trim(),logo:CFG.logo||'',ops:ops,req:$('#rl').value.trim()});CFG.directors=dirs;CFG.outlets=out;CFG.walk=wl;CFG.closing=$('#cl').value.trim();CFG.ck=$('#kl').value.trim();CFG.ops=ops;CFG.req=$('#rl').value.trim();$('#sm').innerHTML=note('Saved.','ok" style="padding:10px;color:#fff;border-radius:8px')}
+  catch(e){$('#sm').innerHTML=note('Could not save: '+esc(dbErr(e))+' (only the owner / editors can change settings)','err')}}}
+
+var WALK_DEFAULT=['## Food hygiene & safety',
+'Staff in clean uniform, hair covered, nails trimmed, no jewellery',
+'All staff fit for work - nobody with illness, infection or open wounds',
+'Hand-wash stations working and stocked (soap, sanitiser, tissue)',
+'Chiller temperature (C) [temp]',
+'Freezer temperature (C) [temp]',
+'Raw and cooked food stored separately, covered and labelled with date',
+'Expiry / date labels checked - expired or doubtful items discarded',
+'Cooking oil checked / changed',
+'Sanitiser solution prepared for surfaces, boards and knives',
+'Food-contact surfaces, boards, knives and equipment clean and sanitised',
+'Drinking water and ice are clean',
+'No signs of pests or insects',
+'## Cleaning',
+'Dining area floors, tables and chairs clean',
+'Washrooms clean, stocked and odour-free',
+'Kitchen floor, drains and exhaust / hood clean',
+'Dustbins emptied, lined and lids closed',
+'Glass, doors and menu cards clean',
+'## Safety',
+'Gas / LPG connections checked - no leak smell',
+'Fire extinguishers in place and exits clear',
+'No exposed wires; equipment and lights working',
+'First-aid box stocked',
+'CCTV working',
+'## Opening tasks',
+'Staff attendance taken, positions assigned, briefing done',
+'POS / terminals on, date correct, change float counted',
+'Stock availability and prep checked against par levels',
+'AC, lights, music and signage on'].join('\n');
+var DAYS=['sun','mon','tue','wed','thu','fri','sat'],DAYN={sun:'Sunday',mon:'Monday',tue:'Tuesday',wed:'Wednesday',thu:'Thursday',fri:'Friday',sat:'Saturday'};
+function parseWalk(t,date){var dw=DAYS[new Date((date||today())+'T12:00:00').getDay()],out=[],cur=null;String(t||'').split('\n').forEach(function(l){l=l.trim();if(!l)return;if(l.indexOf('##')===0){cur={sec:l.replace(/^#+\s*/,''),items:[]};out.push(cur)}else{if(!cur){cur={sec:'General',items:[]};out.push(cur)}var num=/\[temp\]\s*$/i.test(l),dm=l.match(/\[(sun|mon|tue|wed|thu|fri|sat)\]\s*$/i),day=dm?dm[1].toLowerCase():'';if(day&&day!==dw)return;cur.items.push({t:l.replace(/\s*\[(temp|sun|mon|tue|wed|thu|fri|sat)\]\s*$/i,''),num:num,day:day})}});return out.filter(function(c){return c.items.length})}
+var KINDS={walk:{coll:'walk',key:'walk',title:'Manager Walk - before opening',by:'Walk done by (manager name)',btn:'Submit walk',done:'Manager Walk'},ck:{coll:'cklist',key:'ck',title:'Closing Checklist',by:'Checked by (manager name)',btn:'Submit checklist',done:'Closing Checklist'}};
+
+var CK_DEFAULT=['## Kitchen & equipment',
+'Fryers, grills and cooking equipment switched off, cooled and cleaned',
+'Gas / LPG valves closed - no leak smell',
+'Counters, boards and knives cleaned and sanitised',
+'Kitchen floor and drains washed',
+'Exhaust / hood switched off',
+'## Food & stock',
+'Leftover food covered, labelled with date and stored in chiller',
+'Raw and cooked food stored separately',
+'Chillers and freezers closed and running',
+'Store locked and stock secured',
+'Wastage recorded',
+'## Dining & washrooms',
+'Tables and chairs cleaned, floors mopped',
+'Washrooms cleaned and stocked',
+'Dustbins emptied and garbage taken out',
+'## Cash & reports',
+'POS closing report printed and cash counted',
+'Cash deposited / locked in safe',
+'Closing counts and Closing Sales Report submitted',
+'## Safety & security',
+'AC, lights, music and non-essential equipment switched off',
+'Fire extinguishers in place and exits clear',
+'Doors, shutters and windows locked; CCTV working',
+'Keys handed over / secured',
+'## Deep cleaning (every Monday)',
+'Fryers and grills deep cleaned, oil filtered / changed [mon]',
+'Exhaust hood and filters deep cleaned [mon]',
+'Chillers and freezers emptied, defrosted if needed and wiped inside [mon]',
+'Kitchen walls, behind equipment and drains scrubbed [mon]',
+'Washrooms deep cleaned and descaled [mon]',
+'Dining furniture, under tables and AC vents cleaned [mon]',
+'Storeroom shelves wiped and stock rotated [mon]'].join('\n');
+function shrink(f){return new Promise(function(res){var u=URL.createObjectURL(f),im=new Image();im.onload=function(){try{var m=1280,r=Math.min(1,m/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=Math.round(im.width*r);c.height=Math.round(im.height*r);c.getContext('2d').drawImage(im,0,0,c.width,c.height);c.toBlob(function(b){URL.revokeObjectURL(u);res(b&&b.size?b:f)},'image/jpeg',0.72)}catch(e){res(f)}};im.onerror=function(){URL.revokeObjectURL(u);res(f)};im.src=u})}
+function phHtml(key,a){if(!AS)return '';var p=a.photos||[];return '<div class="ph">'+p.map(function(id,i){return '<span class="pt"><img src="/_blob/'+id+'" alt="photo"><b data-pd="'+key+'.'+i+'">&times;</b></span>'}).join('')+(p.length<3?'<label class="pa">&#128247; '+(p.length?'Add another':'Add photo')+'<input type="file" accept="image/*" data-pf="'+key+'" hidden></label>':'')+'</div>'}
+var WK=null;
+async function viewWalk(o,kind){
+ kind=kind||'walk';var K=KINDS[kind],date=today(),list=parseWalk(CFG[K.key]||(kind==='ck'?CK_DEFAULT:WALK_DEFAULT),date);
+ WK={o:o,date:date,by:'',ans:{},list:list,prev:false,kind:kind,K:K,up:0};
+ if(DB){try{var s=await DB.doc(K.coll+'/'+sl(o)+'_'+date).get();if(s.exists){var v=s.data();WK.by=v.by||'';WK.prev=true;(v.items||[]).forEach(function(it){WK.ans[it.sec+'|'+it.t]={a:it.a,note:it.note||'',val:it.val==null?'':it.val,photos:it.photos||[]}})}}catch(e){}}
+ renderWalk()}
+function wkTotals(){var n=0,done=0,bad=false;WK.list.forEach(function(sc){sc.items.forEach(function(it){n++;var a=WK.ans[sc.sec+'|'+it.t]||{};if(it.num){if(a.val!==''&&a.val!=null)done++}else if(a.a){done++;if(a.a==='N'&&!String(a.note||'').trim())bad=true}})});return{n:n,done:done,bad:bad}}
+function wkUpd(){var t=wkTotals(),ok=t.done===t.n&&!t.bad&&WK.by.trim()&&DB;$('#wp').textContent=WK.up?'Uploading photo...':t.done+' of '+t.n+' answered'+(t.bad?' - add a remark for each No':'');$('#wsb').disabled=!ok||WK.up>0}
+function renderWalk(){
+ var h='<header><div><b>'+esc(WK.o)+'</b><br><small>'+esc(WK.K.title)+'</small></div><button class="sec" id="bk" style="padding:8px 12px">Back</button></header><div class="wrap">'+(WK.prev?note('Today\'s '+WK.K.done+' was already submitted. Submitting again replaces it.'):'')+(DB?'':note('Not signed in - cannot save.','err'))+
+  '<div class="card open"><div class="body"><label>'+WK.K.by+'</label><input id="wby" value="'+esc(WK.by)+'" placeholder="Your name"></div></div>';
+ WK.list.forEach(function(sc,si){h+='<div class="card open"><h3>'+esc(sc.sec)+'</h3><div class="body">';
+  sc.items.forEach(function(it,ii){var k=sc.sec+'|'+it.t,a=WK.ans[k]||{};
+   h+='<div class="wi"><div>'+esc(it.t)+(it.day?' <span style="background:#fff3cd;color:#8a6d00;border-radius:6px;padding:1px 6px;font-size:11px;font-weight:700">'+DAYN[it.day].toUpperCase()+'</span>':'')+'</div>';
+   if(it.num)h+='<input type="number" inputmode="decimal" step="any" data-wv="'+si+'.'+ii+'" value="'+esc(a.val==null?'':a.val)+'" placeholder="Reading" style="margin-top:6px">';
+   else{h+='<div class="wb">'+[['Y','Yes'],['N','No'],['A','N/A']].map(function(b){return '<button class="'+(a.a===b[0]?'on '+b[0]:'')+'" data-wk="'+si+'.'+ii+'" data-a="'+b[0]+'">'+b[1]+'</button>'}).join('')+'</div>';
+    if(a.a==='N')h+='<input data-wn="'+si+'.'+ii+'" value="'+esc(a.note||'')+'" placeholder="What is wrong / action taken (required)" style="margin-top:6px;border-color:#c62828">'}
+   h+=phHtml(si+'.'+ii,a)+'</div>'})
+  h+='</div></div>'});
+ h+=(AS?'':'<div class="sub" style="padding:0 4px 8px">Photo upload is not available for your login - ask the owner to give you Contributor access.</div>')+'<div id="wmsg"></div></div><div class="bar" style="align-items:center"><div id="wp" style="flex:1;font-size:13px;color:#555"></div><button id="wsb" style="flex:1">'+WK.K.btn+'</button></div>';
+ $('#app').innerHTML=h;
+ var y=window.scrollY;
+ $('#bk').onclick=function(){viewOutlet(WK.o)};
+ $('#wby').oninput=function(){WK.by=this.value;wkUpd()};
+ var at=function(p){var q=p.split('.');var sc=WK.list[+q[0]],it=sc.items[+q[1]];return{k:sc.sec+'|'+it.t,sc:sc,it:it}};
+ document.querySelectorAll('[data-wk]').forEach(function(b){b.onclick=function(){var x=at(b.dataset.wk),c=WK.ans[x.k]||(WK.ans[x.k]={a:'',note:'',val:''});c.a=b.dataset.a;var yy=window.scrollY;renderWalk();window.scrollTo(0,yy)}});
+ document.querySelectorAll('[data-wn]').forEach(function(i){i.oninput=function(){var x=at(i.dataset.wn);WK.ans[x.k].note=i.value;wkUpd()}});
+ document.querySelectorAll('[data-wv]').forEach(function(i){i.oninput=function(){var x=at(i.dataset.wv);var c=WK.ans[x.k]||(WK.ans[x.k]={a:'',note:'',val:''});c.val=i.value;wkUpd()}});
+ document.querySelectorAll('[data-pf]').forEach(function(inp){inp.onchange=async function(){var f=inp.files&&inp.files[0];if(!f)return;var x=at(inp.dataset.pf),c=WK.ans[x.k]||(WK.ans[x.k]={a:'',note:'',val:'',photos:[]});c.photos=c.photos||[];inp.parentNode.firstChild.textContent='Uploading... ';WK.up++;wkUpd();
+  try{var bl=await shrink(f),r=await AS.upload(bl,{type:bl.type||'image/jpeg'});c.photos.push(r.id)}catch(e){$('#wmsg').innerHTML=note('Photo not saved: '+esc(dbErr(e)),'err')}
+  WK.up--;var yy=window.scrollY;renderWalk();window.scrollTo(0,yy)}});
+ document.querySelectorAll('[data-pd]').forEach(function(b){b.onclick=function(){var q=b.dataset.pd.split('.'),x=at(q[0]+'.'+q[1]),c=WK.ans[x.k],id=c.photos.splice(+q[2],1)[0];try{AS.delete(id).catch(function(){})}catch(e){}var yy=window.scrollY;renderWalk();window.scrollTo(0,yy)}});
+ $('#wsb').onclick=submitWalk;wkUpd()}
+async function submitWalk(){
+ var b=$('#wsb');b.disabled=true;b.textContent='Saving...';var K=WK.K;
+ var items=[],y=0,n=0,na=0,ph=0;
+ WK.list.forEach(function(sc){sc.items.forEach(function(it){var a=WK.ans[sc.sec+'|'+it.t]||{};ph+=(a.photos||[]).length;if(it.num)items.push({sec:sc.sec,t:it.t,val:Number(a.val),photos:a.photos||[]});else{items.push({sec:sc.sec,t:it.t,day:it.day||'',a:a.a,note:a.a==='N'?a.note.trim():'',photos:a.photos||[]});if(a.a==='Y')y++;else if(a.a==='N')n++;else na++}})});
+ try{await DB.doc(K.coll+'/'+sl(WK.o)+'_'+WK.date).set({outlet:WK.o,date:WK.date,month:WK.date.slice(0,7),by:WK.by.trim(),submittedAt:new Date().toISOString(),items:items,summary:{yes:y,no:n,na:na,total:items.length,photos:ph}});
+  viewOutlet(WK.o,note(K.done+' submitted: '+y+' Yes, '+n+' No, '+na+' N/A'+(ph?', '+ph+' photo'+(ph>1?'s':''):''),'ok" style="padding:10px;color:#fff;border-radius:8px;margin-bottom:8px'))}
+ catch(e){b.disabled=false;b.textContent=K.btn;$('#wmsg').innerHTML=note('Could not save: '+esc(dbErr(e)),'err')}}
+
+var CLOSE_DEFAULT=['## Meat','Chicken - raw | kg','Chicken - marinated | kg','Chicken - cooked / ready | pcs','Beef / mutton | kg','Patties | pcs','Sausages / nuggets / strips | pcs',
+'## Beverages','Soft drink cans | pcs','Soft drink 1.5 L | bottles','Soft drink 500 ml | bottles','Water 500 ml | bottles','Juices / energy drinks | pcs','Syrups / concentrates | bottles',
+'## Ice cream department','Vanilla | tub','Chocolate | tub','Strawberry | tub','Other flavours | tub','Cones | pcs','Cups / toppings | pcs'].join('\n');
+function parseClose(t){var out=[],cur=null;String(t||'').split('\n').forEach(function(l){l=l.trim();if(!l)return;if(l.indexOf('##')===0){cur={sec:l.replace(/^#+\s*/,''),items:[]};out.push(cur)}else{if(!cur){cur={sec:'General',items:[]};out.push(cur)}var p=l.split('|');cur.items.push({t:p[0].trim(),unit:(p[1]||'').trim()})}});return out}
+
+var REQ_DEFAULT=['## Commissary - chicken','Fried chicken - marinated | kg','Chicken strips / nuggets | kg','Chicken patties | pcs','Leg Broast | qtrs','Wings | kg',
+'## Sauces & dips','Mayo | kg','Hot sauce | bottles','Ketchup | kg','Garlic dip | kg',
+'## Beverages & ice cream','Soft drink cans | pcs','Soft drink 1.5 L | bottles','Water 500 ml | bottles','Ice cream tubs | tub','Cones | pcs',
+'## Packaging','Burger boxes | pcs','Chicken buckets | pcs','Fries pouches | pcs','Tissue | packs','Polybags | packs','Cups & lids | pcs',
+'## Cleaning & other','Sanitiser | ltr','Cleaning chemicals | ltr','Garbage bags | packs','Gloves | boxes'].join('\n');
+function nextDate(d){var x=new Date(d+'T12:00:00');x.setDate(x.getDate()+1);return x.getFullYear()+'-'+('0'+(x.getMonth()+1)).slice(-2)+'-'+('0'+x.getDate()).slice(-2)}
+var RQ=null;
+async function viewReq(o){
+ RQ={o:o,date:nextDate(today()),by:'',vals:{},other:'',prev:false,list:parseClose(CFG.req||REQ_DEFAULT)};
+ await loadReq();renderReq()}
+async function loadReq(){RQ.vals={};RQ.other='';RQ.prev=false;RQ.status='';RQ.at='';RQ.dirty=false;
+ if(DB){try{var s=await DB.doc('req/'+sl(RQ.o)+'_'+RQ.date).get();if(s.exists){var v=s.data();RQ.by=v.by||RQ.by;RQ.other=v.other||'';RQ.prev=true;RQ.status=v.status||'submitted';RQ.at=v.savedAt||v.submittedAt||'';(v.lines||[]).forEach(function(l){RQ.vals[l.sec+'|'+l.t]=String(l.qty)})}}catch(e){}}}
+function rqCount(){var n=0;RQ.list.forEach(function(sc){sc.items.forEach(function(it){if(Number(RQ.vals[sc.sec+'|'+it.t])>0)n++})});return n}
+function rqUpd(){var n=rqCount(),has=n>0||RQ.other.trim();$('#qp').textContent=n+' item'+(n===1?'':'s')+' requested'+(RQ.other.trim()?' + other':'');$('#qsb').disabled=!(has&&RQ.by.trim()&&DB);$('#qdr').disabled=!(has&&DB)}
+function renderReq(){
+ var h='<header><div><b>'+esc(RQ.o)+'</b><br><small>Warehouse Requisition / Demand</small></div><button class="sec" id="bk" style="padding:8px 12px">Back</button></header><div class="wrap">'+(RQ.prev?(RQ.status==='draft'?note('Draft saved'+(RQ.at?' at '+new Date(RQ.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'')+' - not sent yet. Keep adding items during the day and press Send requisition at the end of the day.'):note('Requisition already sent'+(RQ.at?' at '+new Date(RQ.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'')+'. Sending again replaces it.')):note('Add items during the day, press Save draft whenever you want, and press Send requisition at the end of the day.'))+'<div id="qp" style="font-weight:700;margin:0 2px 8px"></div>'+(DB?'':note('Not signed in - cannot save.','err'))+
+  '<div class="card open"><div class="body"><div class="g2"><div><label>Required for (date)</label><input type="date" id="qd" value="'+RQ.date+'" min="'+today()+'"></div><div><label>Requested by (name)</label><input id="qby" value="'+esc(RQ.by)+'" placeholder="Your name"></div></div><div class="sub" style="margin-top:6px">Enter the quantity needed for every item you require. Leave blank for items you do not need.</div></div></div>';
+ RQ.list.forEach(function(sc,si){h+='<div class="card open"><h3>'+esc(sc.sec)+'</h3><div class="body">';
+  sc.items.forEach(function(it,ii){h+='<div class="row" style="grid-template-columns:1fr 110px"><div>'+esc(it.t)+(it.unit?' <span class="sub">('+esc(it.unit)+')</span>':'')+'</div><input type="number" inputmode="decimal" step="any" min="0" data-qv="'+si+'.'+ii+'" value="'+esc(RQ.vals[sc.sec+'|'+it.t]===undefined?'':RQ.vals[sc.sec+'|'+it.t])+'" placeholder="Qty"></div>'});
+  h+='</div></div>'});
+ h+='<div class="card open"><h3>Other items / remarks</h3><div class="body"><textarea id="qo" rows="3" placeholder="Any item not listed above (name, quantity, unit) or urgent note">'+esc(RQ.other)+'</textarea></div></div><div id="qmsg"></div></div><div class="bar"><button class="sec" id="qdr">Save draft</button><button id="qsb">Send requisition</button></div>';
+ $('#app').innerHTML=h;
+ $('#bk').onclick=async function(){if(RQ.dirty&&DB&&(rqCount()||RQ.other.trim())){await saveReq('draft',true)}viewOutlet(RQ.o)};
+ $('#qdr').onclick=function(){saveReq('draft')};
+ $('#qby').oninput=function(){RQ.by=this.value;RQ.dirty=true;rqUpd()};
+ $('#qo').oninput=function(){RQ.other=this.value;RQ.dirty=true;rqUpd()};
+ $('#qd').onchange=async function(){if(!this.value||this.value<today()){this.value=RQ.date;return}var nd=this.value;if(RQ.dirty&&DB&&(rqCount()||RQ.other.trim()))await saveReq('draft',true);RQ.date=nd;await loadReq();var yy=window.scrollY;renderReq();window.scrollTo(0,yy)};
+ document.querySelectorAll('[data-qv]').forEach(function(i){i.oninput=function(){var q=i.dataset.qv.split('.'),sc=RQ.list[+q[0]],it=sc.items[+q[1]];RQ.vals[sc.sec+'|'+it.t]=i.value;RQ.dirty=true;rqUpd()}});
+ $('#qsb').onclick=function(){saveReq('submitted')};rqUpd()}
+async function saveReq(status,silent){
+ var b=$(status==='draft'?'#qdr':'#qsb');if(!silent&&b){b.disabled=true;b.textContent='Saving...'}
+ var lines=[];RQ.list.forEach(function(sc){sc.items.forEach(function(it){var q=Number(RQ.vals[sc.sec+'|'+it.t]);if(q>0)lines.push({sec:sc.sec,t:it.t,unit:it.unit,qty:q})})});
+ var nowIso=new Date().toISOString();
+ try{await DB.doc('req/'+sl(RQ.o)+'_'+RQ.date).set({outlet:RQ.o,forDate:RQ.date,date:RQ.date,month:RQ.date.slice(0,7),by:RQ.by.trim(),other:RQ.other.trim(),count:lines.length+(RQ.other.trim()?1:0),lines:lines,status:status,savedAt:nowIso,submittedAt:status==='submitted'?nowIso:null});
+  RQ.dirty=false;RQ.prev=true;RQ.status=status;RQ.at=nowIso;
+  if(silent)return;
+  if(status==='submitted')viewOutlet(RQ.o,note('Requisition sent for '+RQ.date+': '+lines.length+' item'+(lines.length===1?'':'s')+(RQ.other.trim()?' + other':''),'ok" style="padding:10px;color:#fff;border-radius:8px;margin-bottom:8px'));
+  else{var yy=window.scrollY;renderReq();window.scrollTo(0,yy)}}
+ catch(e){if(silent)return;renderReq();$('#qmsg').innerHTML=note('Could not save: '+esc(dbErr(e)),'err')}}
+var CC=null;
+function prevDate(d){var x=new Date(d+'T12:00:00');x.setDate(x.getDate()-1);return x.getFullYear()+'-'+('0'+(x.getMonth()+1)).slice(-2)+'-'+('0'+x.getDate()).slice(-2)}
+async function viewClosing(o){
+ var date=today();CC={o:o,date:date,by:'',vals:{},rem:{},skip:{},y:{},list:parseClose(CFG.closing||CLOSE_DEFAULT),prev:false};
+ if(DB){
+  try{var s=await DB.doc('closing/'+sl(o)+'_'+date).get();if(s.exists){var v=s.data();CC.by=v.by||'';CC.prev=true;(v.depts||[]).forEach(function(d){CC.rem[d.sec]=d.remarks||'';if(d.skip)CC.skip[d.sec]=true;(d.items||[]).forEach(function(it){if(it.val!=null)CC.vals[d.sec+'|'+it.t]=String(it.val)})})}}catch(e){}
+  try{var y=await DB.doc('closing/'+sl(o)+'_'+prevDate(date)).get();if(y.exists)(y.data().depts||[]).forEach(function(d){(d.items||[]).forEach(function(it){if(it.val!=null)CC.y[d.sec+'|'+it.t]=it.val})})}catch(e){}}
+ renderClosing()}
+function ccTotals(){var n=0,done=0;CC.list.forEach(function(sc){if(CC.skip[sc.sec])return;sc.items.forEach(function(it){n++;var v=CC.vals[sc.sec+'|'+it.t];if(v!==undefined&&v!=='')done++})});return{n:n,done:done}}
+function ccUpd(){var t=ccTotals();$('#cp').textContent=t.done+' of '+t.n+' counted';$('#csb').disabled=!(t.done===t.n&&CC.by.trim()&&DB)}
+function renderClosing(){
+ var h='<header><div><b>'+esc(CC.o)+'</b><br><small>Closing counts</small></div><button class="sec" id="bk" style="padding:8px 12px">Back</button></header><div class="wrap">'+(CC.prev?note('Today\'s closing counts were already submitted. Submitting again replaces them.'):'')+(DB?'':note('Not signed in - cannot save.','err'))+
+  '<div class="card open"><div class="body"><label>Counted by (name)</label><input id="cby" value="'+esc(CC.by)+'" placeholder="Your name"><div class="sub" style="margin-top:6px">Enter the final closing balance of every item. Enter 0 where nothing is left.</div></div></div>';
+ CC.list.forEach(function(sc,si){var sk=!!CC.skip[sc.sec];
+  h+='<div class="card open"><h3>'+esc(sc.sec)+'</h3><div class="body"><label style="display:flex;gap:8px;align-items:center;margin:0 0 8px;font-size:13px"><input type="checkbox" data-sk="'+si+'" '+(sk?'checked':'')+' style="width:20px;height:20px"> Not applicable at this outlet</label>';
+  if(!sk){sc.items.forEach(function(it,ii){var k=sc.sec+'|'+it.t,yv=CC.y[k];
+   h+='<div class="row" style="grid-template-columns:1fr 110px"><div>'+esc(it.t)+(it.unit?' <span class="sub">('+esc(it.unit)+')</span>':'')+'</div><input type="number" inputmode="decimal" step="any" data-cv="'+si+'.'+ii+'" value="'+esc(CC.vals[k]===undefined?'':CC.vals[k])+'" placeholder="'+(yv!=null?'Yest. '+yv:'Count')+'"></div>'});
+   h+='<label>Remarks (optional)</label><input data-cr="'+si+'" value="'+esc(CC.rem[sc.sec]||'')+'" placeholder="Wastage, shortage, pending delivery...">'}
+  h+='</div></div>'});
+ h+='<div id="cmsg"></div></div><div class="bar" style="align-items:center"><div id="cp" style="flex:1;font-size:13px;color:#555"></div><button id="csb" style="flex:1">Submit counts</button></div>';
+ $('#app').innerHTML=h;
+ var at=function(p){var q=p.split('.');var sc=CC.list[+q[0]];return{sc:sc,it:sc.items[+q[1]]}};
+ $('#bk').onclick=function(){viewOutlet(CC.o)};
+ $('#cby').oninput=function(){CC.by=this.value;ccUpd()};
+ document.querySelectorAll('[data-sk]').forEach(function(c){c.onchange=function(){CC.skip[CC.list[+c.dataset.sk].sec]=c.checked;var yy=window.scrollY;renderClosing();window.scrollTo(0,yy)}});
+ document.querySelectorAll('[data-cv]').forEach(function(i){i.oninput=function(){var x=at(i.dataset.cv);CC.vals[x.sc.sec+'|'+x.it.t]=i.value;ccUpd()}});
+ document.querySelectorAll('[data-cr]').forEach(function(i){i.oninput=function(){CC.rem[CC.list[+i.dataset.cr].sec]=i.value}});
+ $('#csb').onclick=submitClosing;ccUpd()}
+async function submitClosing(){
+ var b=$('#csb');b.disabled=true;b.textContent='Saving...';
+ var depts=CC.list.map(function(sc){var sk=!!CC.skip[sc.sec];return{sec:sc.sec,skip:sk,remarks:(CC.rem[sc.sec]||'').trim(),items:sk?[]:sc.items.map(function(it){return{t:it.t,unit:it.unit,val:Number(CC.vals[sc.sec+'|'+it.t])}})}});
+ try{await DB.doc('closing/'+sl(CC.o)+'_'+CC.date).set({outlet:CC.o,date:CC.date,month:CC.date.slice(0,7),by:CC.by.trim(),submittedAt:new Date().toISOString(),depts:depts});
+  viewOutlet(CC.o,note('Closing counts submitted ('+depts.filter(function(d){return!d.skip}).length+' of '+depts.length+' departments)','ok" style="padding:10px;color:#fff;border-radius:8px;margin-bottom:8px'))}
+ catch(e){b.disabled=false;b.textContent='Submit counts';$('#cmsg').innerHTML=note('Could not save: '+esc(dbErr(e)),'err')}}
+
+function mkId(){return sl(INFO.outlet)+'_'+S.date}
+async function finalise(){var b=$('#fin');b.disabled=true;save();S.dayName=DAYN[new Date(S.date+'T12:00:00').getDay()];FINAL=dsrCalc(S);MORN=null;
+ if(DB){try{var m=await DB.doc('morning/'+mkId()).get();if(m.exists)MORN=Number(m.data().total)}catch(e){}}
+ viewResult()}
+async function monthDocs(outlet,month){
+ var q=await DB.collection('dsr').where('outlet','==',outlet).where('month','==',month).get();
+ return q.docs.map(function(x){var v=x.data();return{date:v.date,d:v.d,revision:v.revision}})}
+async function makeBook(outlet,month){
+ var docs=await monthDocs(outlet,month);if(!docs.length)throw new Error('No submitted days for '+outlet+' in '+month);
+ var wb=buildWorkbook(outlet,docs);return{wb:wb,docs:docs,name:'DSR '+outlet.toUpperCase()+' '+MON[+month.slice(5,7)-1]+' '+month.slice(0,4)+'.xlsx'}}
+async function downloadMonth(outlet,month,el){
+ try{if(!DB)throw new Error('Not signed in');var bk=await makeBook(outlet,month);
+  if(!DL){el.innerHTML='Downloads are not available in this view.';return}
+  var arr=XLSX.write(bk.wb,{type:'array',bookType:'xlsx'});
+  await DL.save({filename:bk.name,data:new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'})});el.textContent='Saved '+bk.name}
+ catch(e){el.textContent='Could not download: '+dbErr(e)}}
+function R(a,b,cls){return '<tr class="'+(cls||'')+'"><td>'+a+'</td><td>'+b+'</td></tr>'}
+function viewResult(){window.scrollTo(0,0);var r=FINAL,T=r.tot,st=r.status,txt=st==='OK'?'CASH OK':(st==='SHORT'?'CASH SHORT<br>Rs '+fmt(-r.diff):'CASH OVER<br>Rs '+fmt(r.diff));
+ var warn=r.errors.map(function(e){return '<div class="err">⛔ '+esc(e)+'</div>'}).join('')+r.warnings.map(function(e){return '<div class="warn">⚠ '+esc(e)+'</div>'}).join('');
+ var tb='<table class="s">'+R('Gross sales (w/o GST)',fmt(T.gross))+R('GST',fmt(T.gst))+R('Discount','- '+fmt(T.disc))+R('Sale return','- '+fmt(T.ret))+R('Entertainment','- '+fmt(T.ent))+R('Total net sales',fmt(T.tnet),'b')+(MORN!=null?R('Morning sales (reported at 6pm)',fmt(MORN))+R('Evening sales',fmt(T.tnet-MORN)):'')+
+  R('Card',fmt(T.card))+R('Food Panda',fmt(T.fp))+R('UAN credit',fmt(T.uan))+R('PPL voucher',fmt(T.ppl))+R('Total credit sales',fmt(T.credit),'b')+R('Cash sales',fmt(T.cash),'b')+
+  R('Supplier / local payments','- '+fmt(r.supplier))+R('Petty cash, advances & expenses','- '+fmt(r.pettyCashExpense))+R('Net cash expected',fmt(r.netCash),'b')+R('Cash in till',fmt(r.cashInTill),'b')+R('Excess / (Short)',(r.diff<0?'('+fmt(-r.diff)+')':fmt(r.diff)),'b')+'</table>';
+ $('#app').innerHTML='<header><div><b>'+esc(INFO.outlet)+' - '+S.date+'</b><br><small>Review before submitting</small></div></header><div class="wrap"><div class="banner '+st.toLowerCase()+'">'+txt+'</div>'+warn+'<div class="card open"><div class="body">'+tb+'</div></div>'+
+  '<label class="chk"><input type="checkbox" id="ck"><span>I have rechecked all figures against the POS closing report and cash count.</span></label><div id="msg"></div></div><div class="bar"><button class="sec" id="ed">← Edit</button><button id="sb" disabled>Submit &amp; email Directors</button></div>';
+ $('#ed').onclick=function(){FINAL=null;viewForm();window.scrollTo(0,0)};
+ $('#ck').onchange=function(){$('#sb').disabled=!(this.checked&&!r.errors.length&&DB)};
+ $('#sb').onclick=submitDay}
+async function submitDay(){
+ var b=$('#sb'),msg=$('#msg');b.disabled=true;$('#ed').disabled=true;b.textContent='Saving...';
+ var r=FINAL,rev=1,steps=[];
+ try{
+  var ex=await DB.doc('dsr/'+mkId()).get();if(ex.exists)rev=(ex.data().revision||1)+1;
+  await DB.doc('dsr/'+mkId()).set({outlet:INFO.outlet,date:S.date,month:S.date.slice(0,7),revision:rev,submittedAt:new Date().toISOString(),summary:{tnet:r.tot.tnet,netCash:r.netCash,cashInTill:r.cashInTill,diff:r.diff,status:r.status},d:S});
+  var mp={};(S.meters||[]).forEach(function(m){if(m.night!==''&&m.night!=null)mp[m.name]=m.night});
+  if(Object.keys(mp).length){var cur={};try{var ms=await DB.doc('meters/'+sl(INFO.outlet)).get();if(ms.exists)cur=ms.data().map||{}}catch(e){}Object.keys(mp).forEach(function(k){cur[k]=mp[k]});await DB.doc('meters/'+sl(INFO.outlet)).set({map:cur})}
+  try{localStorage.removeItem(key())}catch(e){}
+ }catch(e){b.disabled=false;$('#ed').disabled=false;b.innerHTML='Submit &amp; email Directors';msg.innerHTML=note('Could not save: '+esc(dbErr(e))+'. Your entries are still on this phone - try again.','err');return}
+ b.textContent='Emailing...';
+ var res={saved:true,rev:rev,email:null,err:null};
+ try{
+  if(!MCP)throw new Error('Email is not available in this view (open the page signed in on claude.ai with Gmail connected).');
+  var bk=await makeBook(INFO.outlet,S.date.slice(0,7));
+  var b64=XLSX.write(bk.wb,{type:'base64',bookType:'xlsx'});
+  var st=r.status==='OK'?'Cash OK':(r.status==='SHORT'?'CASH SHORT Rs '+fmt(-r.diff):'CASH OVER Rs '+fmt(r.diff));
+  var subj=(rev>1?'REVISED - ':'')+'DSR '+INFO.outlet.toUpperCase()+' - '+S.date+' | Net Sales Rs '+fmt(r.tot.tnet)+' | '+st;
+  var inp={to:CFG.directors,subject:subj,htmlBody:emailHtml(INFO.outlet,S,r,rev,'',MORN)};
+  if(b64.length<900000)inp.attachments=[{content:b64,filename:bk.name,mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}];else res.err='Workbook too large to attach - sent without it.';
+  await MCP.callTool('Gmail','send_message',inp);res.email=CFG.directors.length;
+ }catch(e){res.err=(e&&e.code==='approval_required')?'Gmail needs your approval - tap Retry email.':dbErr(e)}
+ viewDone(res)}
+function viewDone(x){
+ $('#app').innerHTML='<div class="login"><div style="font-size:54px">'+(x.email?'✅':'⚠️')+'</div><h2>'+(x.email?'Submitted':'Saved - email not sent')+'</h2><p>DSR for <b>'+esc(INFO.outlet)+'</b> '+esc(S.date)+(x.rev>1?' (revision '+x.rev+')':'')+' is saved.'+(x.email?' Emailed to '+x.email+' Director'+(x.email>1?'s':'')+'.':'')+'</p>'+(x.err?note(esc(x.err),'err'):'')+
+  (x.email?'':'<button id="rt" style="width:100%;margin-bottom:8px">Retry email</button>')+(PRIV?'<button class="sec" id="dd" style="width:100%;margin-bottom:8px">Download month Excel</button>':'')+'<div id="dm" class="sub"></div><button id="nw" style="width:100%">Done</button></div>';
+ $('#nw').onclick=function(){viewOutlet(INFO.outlet)};
+ if($('#dd'))$('#dd').onclick=function(){downloadMonth(INFO.outlet,S.date.slice(0,7),$('#dm'))};
+ if($('#rt'))$('#rt').onclick=async function(){var r=FINAL=dsrCalc(S);this.disabled=true;
+  try{var bk=await makeBook(INFO.outlet,S.date.slice(0,7));var b64=XLSX.write(bk.wb,{type:'base64',bookType:'xlsx'});
+   await MCP.callTool('Gmail','send_message',{to:CFG.directors,subject:(x.rev>1?'REVISED - ':'')+'DSR '+INFO.outlet.toUpperCase()+' - '+S.date,htmlBody:emailHtml(INFO.outlet,S,r,x.rev,'',MORN),attachments:[{content:b64,filename:bk.name,mimeType:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}]});
+   viewDone({rev:x.rev,email:CFG.directors.length})}catch(e){this.disabled=false;$('#dm').textContent='Email failed: '+dbErr(e)}}}
+try{new MutationObserver(brandAll).observe(document.getElementById('app'),{childList:true})}catch(e){}
+init();
+
+</script></body></html>
