@@ -1,6 +1,5 @@
 <!DOCTYPE html>
-<html lang="en"><head>
-<link rel="icon" href="data:,"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Manager's Portal</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Manager's Portal</title>
 <script>
 /* Implements the claude.use(...) runtime the portal was written for, on top of /api/*.
    Loaded before the app. Shows a login screen first (outlet + PIN, or Director password). */
@@ -357,7 +356,7 @@ function emailHtml(o,d,r,rev,mgr,morn){
   row('Excess / (Short)',r.diff<0?'('+f(-r.diff)+')':f(r.diff),1)+'</table><div style="margin-top:10px;font-size:14px">Takeaway '+am('takeaway')+' &middot; Dine-in '+am('dine')+' &middot; Delivery '+am('delivery')+' ('+r.deptOrders+' orders)</div>'+
   (r.warnings.length?'<div style="margin-top:10px;color:#ef6c00;font-size:13px"><b>Notes:</b><br>'+r.warnings.map(E).join('<br>')+'</div>':'')+
   (d.remarks?'<div style="margin-top:10px;font-size:14px"><b>Manager remarks:</b><br>'+E(d.remarks).replace(/\n/g,'<br>')+'</div>':'')+
-  '<div style="margin-top:14px;color:#777;font-size:12px">Monthly workbook attached (one sheet per day).'+(mgr?' Submitted by '+E(mgr)+'.':'')+'</div></div>';
+  (window.STK_HTML||'')+'<div style="margin-top:14px;color:#777;font-size:12px">Monthly workbook attached (one sheet per day).'+(mgr?' Submitted by '+E(mgr)+'.':'')+'</div></div>';
 }
 var $=function(s){return document.querySelector(s)};
 var SALES=[['gross','Gross Sales w/o GST'],['gst','Sales Tax (GST)'],['disc','Discount'],['ret','Sale Return'],['ent','Entertainment'],['card','Card Sale (Settlement)'],['fp','Food Panda Delivery Sale'],['uan','UAN Credit Sale'],['ppl','PPL Voucher']];
@@ -495,16 +494,36 @@ async function start(date){
  S.meters=INFO.meters.map(function(m){var o=(S.meters||[]).filter(function(x){return x.name===m.name})[0];return o||{name:m.name,last:m.last,morning:'',evening:'',night:''}});
  FINAL=null;viewForm();
  if(EXISTING)$('.wrap').insertAdjacentHTML('afterbegin',note('A DSR for this day was already submitted (revision '+(EXISTING.revision||1)+'). Submitting again will replace it and the email is marked REVISED.'))}
+function photoCut(days){var x=new Date(today()+'T12:00:00');x.setDate(x.getDate()-days);return x.getFullYear()+'-'+('0'+(x.getMonth()+1)).slice(-2)+'-'+('0'+x.getDate()).slice(-2)}
+async function scanPhotos(days){
+ if(!DB||!AS)throw new Error('Not available');
+ var cut=photoCut(days),r={cut:cut,photos:0,docs:[]},cm=cut.slice(0,7),y=+cm.slice(0,4),m=+cm.slice(5,7),months=[];
+ for(var i=0;i<24;i++){months.push(y+'-'+('0'+m).slice(-2));m--;if(m<1){m=12;y--}}
+ for(var ci=0;ci<2;ci++){var coll=['walk','cklist'][ci];
+  for(var mi=0;mi<months.length;mi++){
+   var q=await DB.collection(coll).where('month','==',months[mi]).get();
+   q.docs.forEach(function(d){var v=d.data();if(!v||!v.date||v.date>=cut)return;var ids=[];(v.items||[]).forEach(function(it){(it.photos||[]).forEach(function(id){ids.push(id)})});if(ids.length){r.photos+=ids.length;r.docs.push({path:coll+'/'+sl(v.outlet)+'_'+v.date,ids:ids})}})}}
+ return r}
+async function wipePhotos(r){
+ var n=0;
+ for(var i=0;i<r.docs.length;i++){var d=r.docs[i],s=await DB.doc(d.path).get();if(!s.exists)continue;var v=s.data(),removed=0;
+  for(var j=0;j<d.ids.length;j++){try{await AS.delete(d.ids[j]);removed++}catch(e){if(/not.?found|404|no such|does not exist/i.test(dbErr(e)))removed++}}
+  if(removed<d.ids.length)throw new Error('Could not delete some photos ('+removed+' of '+d.ids.length+' in '+d.path+'). Nothing more was changed.');
+  (v.items||[]).forEach(function(it){if(it.photos&&it.photos.length)it.photos=[]});
+  v.photosRemoved=(v.photosRemoved||0)+removed;if(v.summary)v.summary.photos=0;
+  await DB.doc(d.path).set(v);n+=removed}
+ return n}
 function viewSettings(){
  var o=CFG.outlets;
  $('#app').innerHTML='<header><div><b>Settings</b></div><button class="sec" id="bk" style="padding:8px 12px">Back</button></header><div class="wrap"><div class="card open"><h3>Directors (email recipients)</h3><div class="body"><textarea id="dir" rows="4">'+esc(CFG.directors.join('\n'))+'</textarea><div class="sub">One email per line. Directors and anyone with Editor access can see the Monthly Excel file and Settings.</div><label>Operations Manager email(s) (can also see the Monthly Excel file and Settings)</label><textarea id="ops" rows="2">'+esc((CFG.ops||[]).join('\n'))+'</textarea></div></div>'+
  pilotKeys().map(function(k){return '<div class="card open"><h3>'+esc(k)+'</h3><div class="body"><label>Electricity / gas meters (comma separated, max 8)</label><input data-m="'+esc(k)+'" value="'+esc((o[k].meters||[]).join(', '))+'"><label>Change money float (Rs)</label><input type="number" data-f="'+esc(k)+'" value="'+esc(o[k].floatAmt)+'"></div></div>'}).join('')+
  '<div class="card open"><h3>Manager Walk checklist</h3><div class="body"><textarea id="wl" rows="14">'+esc(CFG.walk||WALK_DEFAULT)+'</textarea><div class="sub">One item per line. Start a line with ## for a section heading. Add [temp] at the end of a line to ask for a number (e.g. a temperature) instead of Yes / No. Add [mon] (or [tue], [wed]...) to show an item only on that day.</div></div></div>'+
- ''+(AS?'<div class="card open"><h3>Logo</h3><div class="body"><div id="lgp">'+(CFG.logo?'<img class="lg" style="height:56px;padding:4px" src="/_blob/'+CFG.logo+'">':'<div class="sub">Default FUSE logo is in use.</div>')+'</div><label class="pa" style="margin-top:8px">&#128247; Upload FUSE logo<input type="file" accept="image/png,image/jpeg,image/webp" id="lgf" hidden></label><div class="sub">Square PNG works best. Applies to everyone after you save settings.</div></div></div>':'')+'<div class="card open"><h3>Warehouse Requisition items</h3><div class="body"><textarea id="rl" rows="16">'+esc(CFG.req||REQ_DEFAULT)+'</textarea><div class="sub">The items managers can request every day. One per line as: Item | unit. Start a line with ## for a section heading.</div></div></div>'+
- '<div class="card open"><h3>Closing counts items</h3><div class="body"><textarea id="cl" rows="14">'+esc(CFG.closing||CLOSE_DEFAULT)+'</textarea><div class="sub">One item per line as: Item | unit. Start a line with ## for a department heading.</div></div></div>'+
+ ''+(AS?'<div class="card open"><h3>Logo</h3><div class="body"><div id="lgp">'+(CFG.logo?'<img class="lg" style="height:56px;padding:4px" src="/_blob/'+CFG.logo+'">':'<div class="sub">Default FUSE logo is in use.</div>')+'</div><label class="pa" style="margin-top:8px">&#128247; Upload FUSE logo<input type="file" accept="image/png,image/jpeg,image/webp" id="lgf" hidden></label><div class="sub">Square PNG works best. Applies to everyone after you save settings.</div></div></div>':'')+(AS?'<div class="card open"><h3>Clear old photos</h3><div class="body"><label>Delete photos older than</label><select id="pcd"><option value="30">30 days</option><option value="60" selected>60 days</option><option value="90">90 days</option><option value="180">180 days</option></select><button class="sec" id="pcs" style="margin-top:8px;width:100%">Check how many</button><div id="pcm" class="sub" style="margin-top:8px"></div><div class="sub">Frees storage. The walk and checklist answers stay - only the pictures are removed.</div></div></div>':'')+'<div class="card open"><h3>Warehouse Requisition items</h3><div class="body"><textarea id="rl" rows="16">'+esc(CFG.req||REQ_DEFAULT)+'</textarea><div class="sub">The items managers can request every day. One per line as: Item | unit. Start a line with ## for a section heading.</div></div></div>'+
+ '<div class="card open"><h3>Closing counts items</h3><div class="body"><textarea id="cl" rows="14">'+esc(CFG.closing||CLOSE_DEFAULT)+'</textarea><div class="sub">One item per line (optionally: Item | unit). Start a line with ## for a heading, e.g. ## Buns. Each item gets Opening, Received, Discard, Issued, Closing and Sold boxes.</div></div></div>'+
  '<div class="card open"><h3>Closing Checklist</h3><div class="body"><textarea id="kl" rows="16">'+esc(CFG.ck||CK_DEFAULT)+'</textarea><div class="sub">One task per line. ## for a section heading. Add [mon] at the end of a line for tasks only needed on Mondays (deep cleaning); [tue], [wed] etc. also work.</div></div></div><div id="sm"></div></div><div class="bar"><button id="sv">Save settings</button></div>';
  $('#bk').onclick=function(){viewHome()};
  if($('#lgf'))$('#lgf').onchange=async function(){var f=this.files[0];if(!f)return;try{var r=await AS.upload(f,{type:f.type});CFG.logo=r.id;$('#lgp').innerHTML='<img class="lg" style="height:56px;background:#C82620;padding:4px" src="/_blob/'+r.id+'"><div class="sub">Uploaded - press Save settings.</div>'}catch(e){$('#sm').innerHTML=note('Logo not uploaded: '+esc(dbErr(e)),'err')}};
+ if($('#pcs'))$('#pcs').onclick=function(){var btn=this,el=$('#pcm'),days=+$('#pcd').value;btn.disabled=true;el.textContent='Checking...';scanPhotos(days).then(function(r){btn.disabled=false;if(!r.photos){el.innerHTML='No photos older than '+days+' days.';return}el.innerHTML='<b>'+r.photos+' photo'+(r.photos===1?'':'s')+'</b> in '+r.docs.length+' entr'+(r.docs.length===1?'y':'ies')+' older than '+days+' days.<br><button id="pcx" style="margin-top:8px;width:100%;background:#B71C1C">Delete these photos</button>';$('#pcx').onclick=function(){this.disabled=true;el.textContent='Deleting...';wipePhotos(r).then(function(n){el.innerHTML='<b style="color:#2e7d32">Deleted '+n+' photos &#10003;</b>'}).catch(function(e){el.innerHTML='<span style="color:#c62828">Stopped: '+esc(dbErr(e))+'</span>'})}}).catch(function(e){btn.disabled=false;el.innerHTML='<span style="color:#c62828">Could not check: '+esc(dbErr(e))+'</span>'})};
  $('#sv').onclick=async function(){
   var dirs=$('#dir').value.split(/[\s,;]+/).map(function(x){return x.trim()}).filter(function(x){return /@/.test(x)});
   var ops=$('#ops').value.split(/[\s,;]+/).map(function(x){return x.trim()}).filter(function(x){return /@/.test(x)});
@@ -622,9 +641,9 @@ async function submitWalk(){
   viewOutlet(WK.o,note(K.done+' submitted: '+y+' Yes, '+n+' No, '+na+' N/A'+(ph?', '+ph+' photo'+(ph>1?'s':''):''),'ok" style="padding:10px;color:#fff;border-radius:8px;margin-bottom:8px'))}
  catch(e){b.disabled=false;b.textContent=K.btn;$('#wmsg').innerHTML=note('Could not save: '+esc(dbErr(e)),'err')}}
 
-var CLOSE_DEFAULT=['## Meat','Chicken - raw | kg','Chicken - marinated | kg','Chicken - cooked / ready | pcs','Beef / mutton | kg','Patties | pcs','Sausages / nuggets / strips | pcs',
-'## Beverages','Soft drink cans | pcs','Soft drink 1.5 L | bottles','Soft drink 500 ml | bottles','Water 500 ml | bottles','Juices / energy drinks | pcs','Syrups / concentrates | bottles',
-'## Ice cream department','Vanilla | tub','Chocolate | tub','Strawberry | tub','Other flavours | tub','Cones | pcs','Cups / toppings | pcs'].join('\n');
+var CLOSE_DEFAULT=['## Buns','Slider bun','Six inch long bun','4.5 plain brioche bun','Tortilla',
+'## Food items','Nuggets','Leg fillet','Injected broast','6 inch patty','Slider patty','Fish burger','Fish nuggets','Strips','Wings','Drum sticks','Square patty','6 inch patty fish','Fries','Peprika sauce','Garlic mayo','Spicy mayo','Black pepper','Cheese slice',
+'## Beverages','Slim can','Small water'].join('\n');
 function parseClose(t){var out=[],cur=null;String(t||'').split('\n').forEach(function(l){l=l.trim();if(!l)return;if(l.indexOf('##')===0){cur={sec:l.replace(/^#+\s*/,''),items:[]};out.push(cur)}else{if(!cur){cur={sec:'General',items:[]};out.push(cur)}var p=l.split('|');cur.items.push({t:p[0].trim(),unit:(p[1]||'').trim()})}});return out}
 
 var REQ_DEFAULT=['## Commissary - chicken','Fried chicken - marinated | kg','Chicken strips / nuggets | kg','Chicken patties | pcs','Leg Broast | qtrs','Wings | kg',
@@ -668,42 +687,59 @@ async function saveReq(status,silent){
  catch(e){if(silent)return;renderReq();$('#qmsg').innerHTML=note('Could not save: '+esc(dbErr(e)),'err')}}
 var CC=null;
 function prevDate(d){var x=new Date(d+'T12:00:00');x.setDate(x.getDate()-1);return x.getFullYear()+'-'+('0'+(x.getMonth()+1)).slice(-2)+'-'+('0'+x.getDate()).slice(-2)}
+function ccN(x){return x===undefined||x===null||x===''||isNaN(Number(x))?0:Number(x)}
+function ccR(x){return Math.round(x*100)/100}
+function ccCalc(v,hasOpen){var o=ccN(v.open),usage=ccR(o+ccN(v.recv)-ccN(v.disc)-ccN(v.iss)-ccN(v.close));var sd=v.sold!==undefined&&v.sold!=='';return{usage:usage,variance:sd?ccR(Number(v.sold)-usage):null}}
+function ccSign(n){return n>0?'+'+n:String(n)}
+function ccGet(k){return CC.vals[k]||(CC.vals[k]={open:'',recv:'',disc:'',iss:'',close:'',sold:''})}
 async function viewClosing(o){
- var date=today();CC={o:o,date:date,by:'',vals:{},rem:{},skip:{},y:{},list:parseClose(CFG.closing||CLOSE_DEFAULT),prev:false};
+ var date=today();CC={o:o,date:date,by:'',vals:{},rem:{},na:{},y:{},yd:'',list:parseClose(CFG.closing||CLOSE_DEFAULT),prev:false};
  if(DB){
-  try{var s=await DB.doc('closing/'+sl(o)+'_'+date).get();if(s.exists){var v=s.data();CC.by=v.by||'';CC.prev=true;(v.depts||[]).forEach(function(d){CC.rem[d.sec]=d.remarks||'';if(d.skip)CC.skip[d.sec]=true;(d.items||[]).forEach(function(it){if(it.val!=null)CC.vals[d.sec+'|'+it.t]=String(it.val)})})}}catch(e){}
-  try{var y=await DB.doc('closing/'+sl(o)+'_'+prevDate(date)).get();if(y.exists)(y.data().depts||[]).forEach(function(d){(d.items||[]).forEach(function(it){if(it.val!=null)CC.y[d.sec+'|'+it.t]=it.val})})}catch(e){}}
+  try{var s=await DB.doc('closing/'+sl(o)+'_'+date).get();if(s.exists){var v=s.data();CC.by=v.by||'';CC.prev=true;(v.depts||[]).forEach(function(d){CC.rem[d.sec]=d.remarks||'';(d.items||[]).forEach(function(it){var k=d.sec+'|'+it.t;if(it.na){CC.na[k]=true;return}var cl=it.close!=null?it.close:it.val;CC.vals[k]={open:it.open==null?'':String(it.open),recv:it.recv?String(it.recv):'',disc:it.disc?String(it.disc):'',iss:it.iss?String(it.iss):'',close:cl==null?'':String(cl),sold:it.sold==null?'':String(it.sold)}})})}}catch(e){}
+  var d=date;for(var i=0;i<7;i++){d=prevDate(d);try{var y=await DB.doc('closing/'+sl(o)+'_'+d).get();if(y.exists){CC.yd=d;(y.data().depts||[]).forEach(function(dp){(dp.items||[]).forEach(function(it){if(it.na)return;var cl=it.close!=null?it.close:it.val;if(cl!=null)CC.y[dp.sec+'|'+it.t]=cl})});break}}catch(e){break}}}
+ CC.list.forEach(function(sc){sc.items.forEach(function(it){var k=sc.sec+'|'+it.t;if(CC.y[k]!==undefined){ccGet(k).open=String(CC.y[k])}})});
  renderClosing()}
-function ccTotals(){var n=0,done=0;CC.list.forEach(function(sc){if(CC.skip[sc.sec])return;sc.items.forEach(function(it){n++;var v=CC.vals[sc.sec+'|'+it.t];if(v!==undefined&&v!=='')done++})});return{n:n,done:done}}
-function ccUpd(){var t=ccTotals();$('#cp').textContent=t.done+' of '+t.n+' counted';$('#csb').disabled=!(t.done===t.n&&CC.by.trim()&&DB)}
+function ccDone(){var n=0,done=0;CC.list.forEach(function(sc){sc.items.forEach(function(it){var k=sc.sec+'|'+it.t;if(CC.na[k])return;n++;var v=CC.vals[k]||{};if(v.close!==''&&v.close!==undefined&&v.sold!==''&&v.sold!==undefined&&(CC.y[k]!==undefined||(v.open!==''&&v.open!==undefined)))done++})});return{n:n,done:done}}
+function ccUpd(){var t=ccDone();$('#cp').textContent=t.done+' of '+t.n+' items complete';$('#csb').disabled=!(t.done===t.n&&CC.by.trim()&&DB)}
+function ccLine(k){var v=CC.vals[k]||{},c=ccCalc(v),vr=c.variance;return 'Usage <b>'+c.usage+'</b> &nbsp;|&nbsp; Variance <b style="color:'+(vr===null?'#999':(vr===0?'#2e7d32':'#c62828'))+'">'+(vr===null?'-':(vr===0?'0':ccSign(vr)))+'</b>'}
 function renderClosing(){
  var h='<header><div><b>'+esc(CC.o)+'</b><br><small>Closing counts</small></div><button class="sec" id="bk" style="padding:8px 12px">Back</button></header><div class="wrap">'+(CC.prev?note('Today\'s closing counts were already submitted. Submitting again replaces them.'):'')+(DB?'':note('Not signed in - cannot save.','err'))+
-  '<div class="card open"><div class="body"><label>Counted by (name)</label><input id="cby" value="'+esc(CC.by)+'" placeholder="Your name"><div class="sub" style="margin-top:6px">Enter the final closing balance of every item. Enter 0 where nothing is left.</div></div></div>';
- CC.list.forEach(function(sc,si){var sk=!!CC.skip[sc.sec];
-  h+='<div class="card open"><h3>'+esc(sc.sec)+'</h3><div class="body"><label style="display:flex;gap:8px;align-items:center;margin:0 0 8px;font-size:13px"><input type="checkbox" data-sk="'+si+'" '+(sk?'checked':'')+' style="width:20px;height:20px"> Not applicable at this outlet</label>';
-  if(!sk){sc.items.forEach(function(it,ii){var k=sc.sec+'|'+it.t,yv=CC.y[k];
-   h+='<div class="row" style="grid-template-columns:1fr 110px"><div>'+esc(it.t)+(it.unit?' <span class="sub">('+esc(it.unit)+')</span>':'')+'</div><input type="number" inputmode="decimal" step="any" data-cv="'+si+'.'+ii+'" value="'+esc(CC.vals[k]===undefined?'':CC.vals[k])+'" placeholder="'+(yv!=null?'Yest. '+yv:'Count')+'"></div>'});
-   h+='<label>Remarks (optional)</label><input data-cr="'+si+'" value="'+esc(CC.rem[sc.sec]||'')+'" placeholder="Wastage, shortage, pending delivery...">'}
-  h+='</div></div>'});
+  '<div class="card open"><div class="body"><label>Counted by (name)</label><input id="cby" value="'+esc(CC.by)+'" placeholder="Your name"><div class="sub" style="margin-top:6px">Opening comes from the last closing'+(CC.yd?' ('+esc(CC.yd)+')':'')+'. Enter what was received from the commissary, discarded and issued, then today\'s closing count and the quantity sold (from the POS item report). Usage and variance are calculated for you: Usage = Opening + Received - Discard - Issued - Closing; Variance = Sold - Usage.</div></div></div>';
+ CC.list.forEach(function(sc,si){
+  h+='<div class="card open"><h3>'+esc(sc.sec)+'</h3><div class="body">';
+  sc.items.forEach(function(it,ii){var k=sc.sec+'|'+it.t,na=!!CC.na[k],v=ccGet(k),ro=CC.y[k]!==undefined,id=si+'.'+ii;
+   var cell=function(lab,f,ph){var isOpen=f==='open';return '<div><div class="sub" style="font-size:11px;margin:0">'+lab+'</div><input type="number" inputmode="decimal" step="any" data-cv="'+id+'" data-f="'+f+'" value="'+esc(v[f])+'" '+(isOpen&&ro?'readonly style="background:#f1ecea;padding:10px 6px"':'style="padding:10px 6px"')+' placeholder="'+(ph||'')+'"></div>'};
+   h+='<div style="border-bottom:1px solid #eee;padding:8px 0"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b>'+esc(it.t)+(it.unit?' <span class="sub">('+esc(it.unit)+')</span>':'')+'</b><label style="display:flex;gap:4px;align-items:center;margin:0;font-size:12px;color:#755F5A"><input type="checkbox" data-na="'+id+'" '+(na?'checked':'')+' style="width:18px;height:18px"> N/A</label></div>';
+   if(!na)h+='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px">'+cell('Opening','open','0')+cell('Received','recv','0')+cell('Discard','disc','0')+cell('Issued','iss','0')+cell('Closing','close','count')+cell('Sold (POS)','sold','qty')+'</div><div class="sub" style="margin-top:6px" id="cl'+id+'">'+ccLine(k)+'</div>';
+   h+='</div>'});
+  h+='<label>Remarks (optional)</label><input data-cr="'+si+'" value="'+esc(CC.rem[sc.sec]||'')+'" placeholder="Wastage, shortage, pending delivery..."></div></div>'});
  h+='<div id="cmsg"></div></div><div class="bar" style="align-items:center"><div id="cp" style="flex:1;font-size:13px;color:#555"></div><button id="csb" style="flex:1">Submit counts</button></div>';
  $('#app').innerHTML=h;
  var at=function(p){var q=p.split('.');var sc=CC.list[+q[0]];return{sc:sc,it:sc.items[+q[1]]}};
  $('#bk').onclick=function(){viewOutlet(CC.o)};
  $('#cby').oninput=function(){CC.by=this.value;ccUpd()};
- document.querySelectorAll('[data-sk]').forEach(function(c){c.onchange=function(){CC.skip[CC.list[+c.dataset.sk].sec]=c.checked;var yy=window.scrollY;renderClosing();window.scrollTo(0,yy)}});
- document.querySelectorAll('[data-cv]').forEach(function(i){i.oninput=function(){var x=at(i.dataset.cv);CC.vals[x.sc.sec+'|'+x.it.t]=i.value;ccUpd()}});
+ document.querySelectorAll('[data-na]').forEach(function(c){c.onchange=function(){var x=at(c.dataset.na);CC.na[x.sc.sec+'|'+x.it.t]=c.checked;var yy=window.scrollY;renderClosing();window.scrollTo(0,yy)}});
+ document.querySelectorAll('[data-cv]').forEach(function(i){i.oninput=function(){var x=at(i.dataset.cv),k=x.sc.sec+'|'+x.it.t;ccGet(k)[i.dataset.f]=i.value;var e=document.getElementById('cl'+i.dataset.cv);if(e)e.innerHTML=ccLine(k);ccUpd()}});
  document.querySelectorAll('[data-cr]').forEach(function(i){i.oninput=function(){CC.rem[CC.list[+i.dataset.cr].sec]=i.value}});
  $('#csb').onclick=submitClosing;ccUpd()}
 async function submitClosing(){
- var b=$('#csb');b.disabled=true;b.textContent='Saving...';
- var depts=CC.list.map(function(sc){var sk=!!CC.skip[sc.sec];return{sec:sc.sec,skip:sk,remarks:(CC.rem[sc.sec]||'').trim(),items:sk?[]:sc.items.map(function(it){return{t:it.t,unit:it.unit,val:Number(CC.vals[sc.sec+'|'+it.t])}})}});
- try{await DB.doc('closing/'+sl(CC.o)+'_'+CC.date).set({outlet:CC.o,date:CC.date,month:CC.date.slice(0,7),by:CC.by.trim(),submittedAt:new Date().toISOString(),depts:depts});
-  viewOutlet(CC.o,note('Closing counts submitted ('+depts.filter(function(d){return!d.skip}).length+' of '+depts.length+' departments)','ok" style="padding:10px;color:#fff;border-radius:8px;margin-bottom:8px'))}
+ var b=$('#csb');b.disabled=true;b.textContent='Saving...';var nv=0,tot=0;
+ var depts=CC.list.map(function(sc){return{sec:sc.sec,remarks:(CC.rem[sc.sec]||'').trim(),items:sc.items.map(function(it){var k=sc.sec+'|'+it.t;if(CC.na[k])return{t:it.t,unit:it.unit,na:true};var v=CC.vals[k]||{},c=ccCalc(v);tot++;if(c.variance)nv++;return{t:it.t,unit:it.unit,open:ccN(v.open),recv:ccN(v.recv),disc:ccN(v.disc),iss:ccN(v.iss),close:Number(v.close),val:Number(v.close),usage:c.usage,sold:Number(v.sold),variance:c.variance}})}});
+ try{await DB.doc('closing/'+sl(CC.o)+'_'+CC.date).set({outlet:CC.o,date:CC.date,month:CC.date.slice(0,7),by:CC.by.trim(),submittedAt:new Date().toISOString(),depts:depts,summary:{items:tot,withVariance:nv}});
+  viewOutlet(CC.o,note('Closing counts submitted - '+(nv?nv+' item'+(nv===1?'':'s')+' with variance':'no variance'),'ok" style="padding:10px;color:#fff;border-radius:8px;margin-bottom:8px'))}
  catch(e){b.disabled=false;b.textContent='Submit counts';$('#cmsg').innerHTML=note('Could not save: '+esc(dbErr(e)),'err')}}
+function stockHtml(doc,date){
+ var box='margin-top:14px;font-size:14px';
+ if(!doc)return '<div style="'+box+';color:#ef6c00"><b>Closing stock count:</b> not submitted for '+date+' yet, so there is no variance to show.</div>';
+ var rows='',nv=0,fx=function(n){return n>0?'+'+n:String(n)};
+ (doc.depts||[]).forEach(function(d){var r='';(d.items||[]).forEach(function(it){if(it.na)return;var vr=it.variance;if(vr)nv++;r+='<tr><td style="padding:4px 8px;border-bottom:1px solid #eee">'+String(it.t).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})+'</td><td align="right" style="padding:4px 8px;border-bottom:1px solid #eee">'+it.usage+'</td><td align="right" style="padding:4px 8px;border-bottom:1px solid #eee">'+it.sold+'</td><td align="right" style="padding:4px 8px;border-bottom:1px solid #eee;'+(vr?'color:#c62828;font-weight:bold':'color:#2e7d32')+'">'+(vr===null||vr===undefined?'-':(vr===0?'0':fx(vr)))+'</td></tr>'});
+  if(r)rows+='<tr><td colspan="4" style="padding:6px 8px;background:#f6ecea;font-weight:bold">'+String(d.sec).replace(/[&<>]/g,'')+'</td></tr>'+r});
+ return '<div style="'+box+'"><b>Closing stock variance</b> - '+(nv?'<span style="color:#c62828"><b>'+nv+' item'+(nv===1?'':'s')+' with variance</b></span>':'<span style="color:#2e7d32"><b>no variance</b></span>')+'<table style="border-collapse:collapse;width:100%;margin-top:6px;font-size:13px"><tr style="background:#C82620;color:#fff"><th align="left" style="padding:5px 8px">Item</th><th align="right" style="padding:5px 8px">Usage</th><th align="right" style="padding:5px 8px">Sold</th><th align="right" style="padding:5px 8px">Variance</th></tr>'+rows+'</table><div style="color:#777;font-size:12px;margin-top:4px">Variance = Sold - Usage. Counted by '+String(doc.by||'').replace(/[&<>]/g,'')+'.</div></div>'}
 
 function mkId(){return sl(INFO.outlet)+'_'+S.date}
 async function finalise(){var b=$('#fin');b.disabled=true;save();S.dayName=DAYN[new Date(S.date+'T12:00:00').getDay()];FINAL=dsrCalc(S);MORN=null;
  if(DB){try{var m=await DB.doc('morning/'+mkId()).get();if(m.exists)MORN=Number(m.data().total)}catch(e){}}
+ window.STK_HTML='';if(DB){try{var cs=await DB.doc('closing/'+mkId()).get();window.STK_HTML=stockHtml(cs.exists?cs.data():null,S.date)}catch(e){window.STK_HTML=''}}
  viewResult()}
 async function monthDocs(outlet,month){
  var q=await DB.collection('dsr').where('outlet','==',outlet).where('month','==',month).get();
