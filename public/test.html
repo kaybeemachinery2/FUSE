@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Portal test</title>
+<style>body{font:17px/1.5 Arial,sans-serif;margin:0;padding:16px;background:#fff;color:#222}h1{font-size:22px;color:#C82620;margin:0 0 8px}.r{padding:10px 12px;margin:8px 0;border-radius:8px;background:#f3f3f3;word-break:break-word}.ok{background:#e6f4ea}.bad{background:#fdecea;color:#b71c1c}small{color:#666}</style></head>
+<body><h1>Portal test page</h1>
+<div class="r ok"><b>1. This page opened</b> - your phone can load the site.</div>
+<div id="out"></div>
+<script>
+var out = document.getElementById('out');
+function line(ok, text) { var d = document.createElement('div'); d.className = 'r ' + (ok ? 'ok' : 'bad'); d.innerHTML = text; out.appendChild(d); }
+line(true, '<b>2. JavaScript runs</b>');
+function check(n, label, url, f) {
+  var t = Date.now(), ctl = new AbortController(), tm = setTimeout(function () { ctl.abort(); }, 15000);
+  fetch(url, { credentials: 'same-origin', signal: ctl.signal }).then(function (r) {
+    clearTimeout(tm);
+    return r.text().then(function (txt) { var ms = Date.now() - t; var ok = f ? f(r, txt) : r.ok; line(ok, '<b>' + n + '. ' + label + '</b>: ' + (ok ? 'OK' : 'PROBLEM') + ' (' + r.status + ', ' + ms + ' ms, ' + txt.length + ' bytes)' + (ok ? '' : '<br><small>' + txt.slice(0, 200).replace(/</g, '&lt;') + '</small>')); });
+  }).catch(function (e) { clearTimeout(tm); line(false, '<b>' + n + '. ' + label + '</b>: FAILED - ' + (e.name === 'AbortError' ? 'no answer after 15 seconds' : e.message)); });
+}
+check(3, 'Server answers (/api/me)', '/api/me', function (r, t) { return /role|login/.test(t); });
+check(4, 'Storage works (/api/health)', '/api/health', function (r, t) { return /"storage":"ok"/.test(t); });
+check(5, 'Spreadsheet file (/xlsx.bundle.js)', '/xlsx.bundle.js', function (r, t) { return r.ok && t.length > 100000; });
+check(6, 'App page (/)', '/', function (r, t) { return r.ok && t.indexOf('Manager') > -1; });
+setTimeout(function () {
+  try { new Function('async function f(){ await 1 } return 1')(); line(true, '<b>7. Modern JavaScript supported</b>'); } catch (e) { line(false, '<b>7. Modern JavaScript</b>: ' + e.message); }
+  line(true, '<small>Browser: ' + navigator.userAgent.slice(0, 120) + '</small>');
+}, 500);
+</script></body></html>
