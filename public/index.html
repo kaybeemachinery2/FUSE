@@ -17,7 +17,7 @@
   window.addEventListener('error', function (e) { show('Error: ' + (e.message || 'unknown') + (e.lineno ? ' (line ' + e.lineno + ')' : '')); });
   window.addEventListener('unhandledrejection', function (e) { show('Problem: ' + ((e.reason && e.reason.message) || e.reason)); });
   setTimeout(function () {
-    if (!window.__SESSION && !document.getElementById('loginov')) show('Still waiting for the portal to start. Screenshot this and send it to Claude.');
+    var app = document.getElementById('app'); if ((!window.__SESSION && !document.getElementById('loginov')) || (app && !app.innerHTML.trim() && !document.getElementById('loginov'))) show('Still waiting for the portal to start. Screenshot this and send it to Claude.');
   }, 7000);
 })();
 /* Implements the claude.use(...) runtime the portal was written for, on top of /api/*.
@@ -28,8 +28,10 @@
 
   function api(path, body, opts) {
     opts = opts || {};
-    return fetch(path, Object.assign({ method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin' },
+    var ctl = new AbortController(), tm = setTimeout(function () { ctl.abort(); }, 25000);
+    return fetch(path, Object.assign({ method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', signal: ctl.signal },
       body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, opts))
+      .then(function (r) { clearTimeout(tm); return r; }, function (e) { clearTimeout(tm); throw new Error(e && e.name === 'AbortError' ? 'The server took too long to answer. Try again.' : (e.message || 'Network problem')); })
       .then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (j) {
           if (r.status === 401 && path !== '/api/login') { SESSION = null; location.reload(); }
