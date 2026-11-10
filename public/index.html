@@ -65,7 +65,14 @@
     if (readyP) return readyP;
     readyP = fetch('/api/me', { credentials: 'same-origin' }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (x) { return x.ok ? x.j : loginUI(x.j.outlets || []); })
-      .then(function (s) { SESSION = s; window.__SESSION = s; signOutBtn(); return s; });
+      .then(function (s) { SESSION = s; window.__SESSION = s; signOutBtn(); return s; })
+      .catch(function (e) {
+        var d = document.createElement('div');
+        d.style.cssText = 'position:fixed;inset:0;background:#FBF4F1;z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;font-family:Arial,Helvetica,sans-serif;text-align:center';
+        d.innerHTML = '<div><div style="font:bold 20px Georgia,serif;color:#C82620;margin-bottom:10px">Manager\'s Portal</div><div style="color:#B71C1C;margin-bottom:14px">Could not reach the server. Check your internet and try again.</div><button onclick="location.reload()" style="padding:12px 22px;font-size:16px;background:#C82620;color:#fff;border:0;border-radius:10px">Retry</button></div>';
+        document.body.appendChild(d);
+        throw e;
+      });
     return readyP;
   }
 
@@ -126,7 +133,7 @@
 })();
 
 </script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<script src="/xlsx.bundle.js"></script>
 <style>
 :root{--b:#C82620;--g:#2A7A4B;--r:#A8201A;--o:#ef6c00;--bg:#F7F2EF}
 *{box-sizing:border-box}body{margin:0;font:15px/1.35 -apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:#2B1B19;padding-bottom:84px}
