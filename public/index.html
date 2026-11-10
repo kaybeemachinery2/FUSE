@@ -1,6 +1,25 @@
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Manager's Portal</title>
 <script>
+/* Visible error report: shows problems on screen instead of a blank page (useful on phones). */
+(function () {
+  var box;
+  function show(msg) {
+    try {
+      if (!box) {
+        box = document.createElement('div');
+        box.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:100000;background:#FFF3E0;color:#B71C1C;font:13px/1.4 Arial,sans-serif;padding:10px 12px;border-bottom:2px solid #C82620;word-break:break-word';
+        (document.body || document.documentElement).appendChild(box);
+      }
+      box.innerHTML += '<div>' + String(msg).replace(/[<>&]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; }) + '</div>';
+    } catch (e) {}
+  }
+  window.addEventListener('error', function (e) { show('Error: ' + (e.message || 'unknown') + (e.lineno ? ' (line ' + e.lineno + ')' : '')); });
+  window.addEventListener('unhandledrejection', function (e) { show('Problem: ' + ((e.reason && e.reason.message) || e.reason)); });
+  setTimeout(function () {
+    if (!window.__SESSION && !document.getElementById('loginov')) show('Still waiting for the portal to start. Screenshot this and send it to Claude.');
+  }, 7000);
+})();
 /* Implements the claude.use(...) runtime the portal was written for, on top of /api/*.
    Loaded before the app. Shows a login screen first (outlet + PIN, or Director password). */
 (function () {
