@@ -4,7 +4,9 @@ export const config = { path: '/api/health' };
 export default L.wrap(async () => {
   const out = { settings: {
     OUTLET_PINS: !!process.env.OUTLET_PINS, DIRECTOR_PASSWORD: !!process.env.DIRECTOR_PASSWORD,
-    SESSION_SECRET: (process.env.SESSION_SECRET || '').length >= 16, RESEND_API_KEY: !!process.env.RESEND_API_KEY } };
+    SESSION_SECRET: (process.env.SESSION_SECRET || '').length >= 16, RESEND_API_KEY: !!process.env.RESEND_API_KEY,
+    GMAIL_USER: !!process.env.GMAIL_USER, GMAIL_APP_PASSWORD: !!process.env.GMAIL_APP_PASSWORD } };
+  out.email = (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) ? 'gmail' : ((process.env.RESEND_API_KEY && process.env.MAIL_FROM) ? 'resend' : 'not set up');
   const t0 = Date.now();
   try {
     const docs = await L.store('docs');

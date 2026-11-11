@@ -14,7 +14,8 @@ Directors get Settings and the Monthly Excel download.
 | `DIRECTOR_PASSWORD` | a long password for Directors / Operations |
 | `OUTLET_PINS` | `{"FUSE Seher":"4821","FUSE Johar":"7305","FUSE @ Yard":"1946","FUSE Lucky One":"6258"}` (choose your own; one line, straight quotes) |
 | `SESSION_SECRET` | any random 16+ characters |
-| `RESEND_API_KEY` + `MAIL_FROM` | for emails (optional at first), e.g. `FUSE Portal <portal@yourdomain.com>` |
+| `GMAIL_USER` + `GMAIL_APP_PASSWORD` | easiest email: a Gmail address and its 16-character Google app password (needs 2-Step Verification) |
+| `RESEND_API_KEY` + `MAIL_FROM` | alternative email via Resend, e.g. `FUSE Portal <portal@yourdomain.com>` (Gmail is used if both are set) |
 | `CRON_SECRET` | optional, only to trigger the morning email by hand |
 | `DIRECTORS` | optional, comma separated emails; otherwise the list saved in Settings (default: the 3 Directors) |
 

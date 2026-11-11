@@ -90,10 +90,28 @@ export async function getConfig() {
   cfg.directors = cfg.directors && cfg.directors.length ? cfg.directors : (envDir.length ? envDir : DEFAULT_DIRECTORS);
   return cfg;
 }
+import nodemailer from 'nodemailer';
+export const _mail = { transport: null }; // tests can replace this
 export async function sendMail({ to, subject, html, text, attachments }) {
   if (process.env.MAIL_DRY_RUN === '1') { mails().push({ to, subject, html, attachments: (attachments || []).map((a) => ({ filename: a.filename, size: (a.content || '').length })) }); return { dry: true }; }
+  // Option 1: Gmail (needs GMAIL_USER and a 16-character Google app password in GMAIL_APP_PASSWORD)
+  const gUser = process.env.GMAIL_USER, gPass = String(process.env.GMAIL_APP_PASSWORD || '').replace(/\s+/g, '');
+  if (gUser && gPass) {
+    const tr = _mail.transport || nodemailer.createTransport({ host: 'smtp.gmail.com', port: 465, secure: true, auth: { user: gUser, pass: gPass }, connectionTimeout: 15000, socketTimeout: 20000 });
+    try {
+      const info = await tr.sendMail({
+        from: process.env.MAIL_FROM || ('FUSE Portal <' + gUser + '>'), to: Array.isArray(to) ? to.join(', ') : to, subject, html, text,
+        attachments: (attachments || []).map((a) => ({ filename: a.filename, content: a.content, encoding: 'base64' })),
+      });
+      return { gmail: true, id: info.messageId };
+    } catch (e) {
+      const m = String(e && e.message || e);
+      throw new Error('Gmail email failed: ' + (/Invalid login|Username and Password|535/i.test(m) ? 'Gmail rejected the login. Check GMAIL_USER and the app password.' : m.slice(0, 200)));
+    }
+  }
+  // Option 2: Resend
   const key = process.env.RESEND_API_KEY, from = process.env.MAIL_FROM;
-  if (!key || !from) throw new Error('Email is not set up yet (RESEND_API_KEY and MAIL_FROM)');
+  if (!key || !from) throw new Error('Email is not set up yet (add GMAIL_USER + GMAIL_APP_PASSWORD, or RESEND_API_KEY + MAIL_FROM)');
   const r = await fetch('https://api.resend.com/emails', {
     method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
     body: JSON.stringify({ from, to, subject, html, text, attachments: (attachments || []).map((a) => ({ filename: a.filename, content: a.content })) }),
