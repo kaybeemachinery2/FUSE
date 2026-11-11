@@ -74,7 +74,7 @@
   function signOutBtn() {
     var b = document.createElement('a');
     b.href = '#'; b.textContent = 'Sign out (' + (SESSION.role === 'director' ? 'Director' : SESSION.outlet) + ')';
-    b.style.cssText = 'position:fixed;right:10px;bottom:6px;font:12px Arial;color:#755F5A;background:rgba(255,255,255,.85);padding:3px 8px;border-radius:10px;z-index:9999';
+    b.style.cssText = 'position:fixed;left:10px;bottom:6px;font:12px Arial;color:#755F5A;background:rgba(255,255,255,.85);padding:3px 8px;border-radius:10px;z-index:9999';
     b.onclick = function (e) { e.preventDefault(); api('/api/me?logout=1').then(function () { location.reload(); }); };
     document.body.appendChild(b);
   }
