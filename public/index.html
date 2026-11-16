@@ -591,6 +591,9 @@ var WALK_DEFAULT=['## Food hygiene & safety',
 'AC, lights, music and signage on'].join('\n');
 var DAYS=['sun','mon','tue','wed','thu','fri','sat'],DAYN={sun:'Sunday',mon:'Monday',tue:'Tuesday',wed:'Wednesday',thu:'Thursday',fri:'Friday',sat:'Saturday'};
 function parseWalk(t,date){var dw=DAYS[new Date((date||today())+'T12:00:00').getDay()],out=[],cur=null;String(t||'').split('\n').forEach(function(l){l=l.trim();if(!l)return;if(l.indexOf('##')===0){cur={sec:l.replace(/^#+\s*/,''),items:[]};out.push(cur)}else{if(!cur){cur={sec:'General',items:[]};out.push(cur)}var num=/\[temp\]\s*$/i.test(l),dm=l.match(/\[(sun|mon|tue|wed|thu|fri|sat)\]\s*$/i),day=dm?dm[1].toLowerCase():'';if(day&&day!==dw)return;cur.items.push({t:l.replace(/\s*\[(temp|sun|mon|tue|wed|thu|fri|sat)\]\s*$/i,''),num:num,day:day})}});return out.filter(function(c){return c.items.length})}
+var OUTLET_EXTRA={'FUSE Lucky One':{
+ walk:'\n## Cleanliness, Conduct & Mall Rules\nNo smoking at or around the kiosk\nNo pan / gutka use\nNo polyethylene bags in use\nNo loud music or sounds\nKiosk never left unattended',
+ ck:'\n## Housekeeping & Common Areas (Mall)\nStorefront, elevation and back store clean and clear\nGarbage disposed at the designated area by day end (F&B trash may also be removed during operations)\nFood court trays returned today'}};
 var KINDS={walk:{coll:'walk',key:'walk',title:'Manager Walk - before opening',by:'Walk done by (manager name)',btn:'Submit walk',done:'Manager Walk'},ck:{coll:'cklist',key:'ck',title:'Closing Checklist',by:'Checked by (manager name)',btn:'Submit checklist',done:'Closing Checklist'}};
 
 var CK_DEFAULT=['## Kitchen & equipment',
@@ -630,7 +633,7 @@ function shrink(f){return new Promise(function(res){var u=URL.createObjectURL(f)
 function phHtml(key,a){if(!AS)return '';var p=a.photos||[];return '<div class="ph">'+p.map(function(id,i){return '<span class="pt"><img src="/_blob/'+id+'" alt="photo"><b data-pd="'+key+'.'+i+'">&times;</b></span>'}).join('')+(p.length<3?'<label class="pa">&#128247; '+(p.length?'Add another':'Add photo')+'<input type="file" accept="image/*" data-pf="'+key+'" hidden></label>':'')+'</div>'}
 var WK=null;
 async function viewWalk(o,kind){
- kind=kind||'walk';var K=KINDS[kind],date=today(),list=parseWalk(CFG[K.key]||(kind==='ck'?CK_DEFAULT:WALK_DEFAULT),date);
+ kind=kind||'walk';var K=KINDS[kind],date=today(),list=parseWalk((CFG[K.key]||(kind==='ck'?CK_DEFAULT:WALK_DEFAULT))+((OUTLET_EXTRA[o]||{})[kind]||''),date);
  WK={o:o,date:date,by:'',ans:{},list:list,prev:false,kind:kind,K:K,up:0};
  if(DB){try{var s=await DB.doc(K.coll+'/'+sl(o)+'_'+date).get();if(s.exists){var v=s.data();WK.by=v.by||'';WK.prev=true;(v.items||[]).forEach(function(it){WK.ans[it.sec+'|'+it.t]={a:it.a,note:it.note||'',val:it.val==null?'':it.val,photos:it.photos||[]}})}}catch(e){}}
  renderWalk()}
